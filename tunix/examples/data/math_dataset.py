@@ -15,7 +15,6 @@
 import os
 import grain
 import tensorflow_datasets as tfds
-import tensorflow_datasets.text.gsm8k
 
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"

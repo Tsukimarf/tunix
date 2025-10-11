@@ -14,12 +14,10 @@
 
 """Checkpoint manager for PEFT."""
 
-import os
 import time
 
 from absl import logging
 from flax import nnx
-import jax
 import orbax.checkpoint as ocp
 
 _DEFAULT_CHECKPOINTING_OPTIONS = ocp.CheckpointManagerOptions(
@@ -47,21 +45,8 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if root_directory is not None:
-      # When using Pathways, the checkpoint manager only supports persistence
-      # APIs now.
-      if 'proxy' in os.getenv('JAX_PLATFORMS', ''):
-        item_handlers = {
-            'model_params': ocp.PyTreeCheckpointHandler(
-                use_ocdbt=False,
-                use_zarr3=False,
-            )
-        }
-        logging.info('Using persistence APIs for checkpointing with Pathways.')
-      else:
-        item_handlers = {"model_params": ocp.PyTreeCheckpointHandler()}
       self._checkpoint_manager = ocp.CheckpointManager(
           root_directory,
-          item_handlers=item_handlers,
           options=options or _DEFAULT_CHECKPOINTING_OPTIONS,
       )
 
@@ -98,15 +83,11 @@ class CheckpointManager:
       params = nnx.state(model, nnx.LoRAParam)
     else:
       params = nnx.state(model)
-    checkpoint_args = ocp.args.PyTreeSave(
-        item=params,
-        save_args=jax.tree.map(
-            lambda _: ocp.SaveArgs(), params
-        ),
-    )
     return self._checkpoint_manager.save(
         step,
-        args=ocp.args.Composite(model_params=checkpoint_args),
+        args=ocp.args.Composite(
+            model_params=ocp.args.StandardSave(params),
+        ),
         force=force,
     )
 
@@ -140,19 +121,11 @@ class CheckpointManager:
       abstract_params = nnx.state(model, nnx.LoRAParam)
     else:
       abstract_params = nnx.state(model)
-
-    def map_to_pspec(data):
-      return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
-
-    restore_args_dict = jax.tree_util.tree_map(
-        map_to_pspec, abstract_params
-    )
-    checkpoint_args = ocp.args.PyTreeRestore(
-        item=abstract_params, restore_args=restore_args_dict
-    )
     ckpt = self._checkpoint_manager.restore(
         step,
-        args=ocp.args.Composite(model_params=checkpoint_args),
+        args=ocp.args.Composite(
+            model_params=ocp.args.StandardRestore(abstract_params),
+        ),
     )
     # Update the model state with params from the restored checkpoint.
     nnx.update(model, ckpt.model_params)
