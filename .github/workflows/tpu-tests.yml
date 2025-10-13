@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run:
+  tpu_unit_tests:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:

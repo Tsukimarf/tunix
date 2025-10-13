@@ -23,7 +23,8 @@ class CalculatorTool(BaseTool):
   systems.
   """
 
-  def get_json_schema(self) -> dict[str, Any]:
+  @property
+  def json(self) -> dict[str, Any]:
     """Generate OpenAI-compatible function schema for the calculator tool.
 
     Defines the tool's interface with strongly typed parameters and
@@ -59,7 +60,7 @@ class CalculatorTool(BaseTool):
         },
     }
 
-  def apply(self, **kwargs: Any) -> ToolOutput:
+  def apply(self, a: float, b: float, op: str) -> ToolOutput:
     """Execute the arithmetic operation with the provided operands and operator.
 
     Performs the requested calculation while handling edge cases and potential
@@ -67,30 +68,14 @@ class CalculatorTool(BaseTool):
     common failure scenarios like division by zero.
 
     Args:
-        **kwargs: Keyword arguments containing 'a' (float), 'b' (float),
-            and 'op' (str).
+        a (float): The first operand for the arithmetic operation
+        b (float): The second operand for the arithmetic operation
+        op (str): The arithmetic operator ("+", "-", "*", "/")
 
     Returns:
         ToolOutput: Result containing either the calculated value or
             detailed error information if the operation fails
     """
-    a = kwargs.get("a")
-    b = kwargs.get("b")
-    op = kwargs.get("op")
-
-    if a is None or b is None or op is None:
-      return ToolOutput(
-          name=self.name,
-          error="Missing required arguments: 'a', 'b', and 'op'",
-      )
-    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
-      return ToolOutput(
-          name=self.name,
-          error="Operands 'a' and 'b' must be numbers (int or float)",
-      )
-    if not isinstance(op, str):
-      return ToolOutput(name=self.name, error="Operator 'op' must be a string")
-
     # pylint: disable=broad-exception-caught
     try:
       if op == "+":
@@ -108,7 +93,7 @@ class CalculatorTool(BaseTool):
       else:
         return ToolOutput(name=self.name, error=f"Unsupported operator: {op}")
 
-      return ToolOutput(name=self.name, output=str(result))
+      return ToolOutput(name=self.name, output=result)
 
     except Exception as e:
       return ToolOutput(name=self.name, error=f"{type(e).__name__}: {e}")

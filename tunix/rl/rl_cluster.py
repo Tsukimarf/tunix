@@ -35,7 +35,6 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
@@ -93,56 +92,82 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     actor_optimizer: Optimizer for the actor model.
     critic_optimizer: Optimizer for the critic model. If None, the critic model
       will be trained in the same optimizer as the actor model.
-    mini_batch_size: The mini-batch size used for policy weight updates. One
-      mini-batch corresponds to one optimizer update. `mini_batch_size` must be
-      divisible by the batch size used for data loading.
-    train_micro_batch_size: The micro-batch size used for gradient
-      accumulation at training time. `train_micro_batch_size` must be
-      divisible by `mini_batch_size`.
-    rollout_micro_batch_size: The micro-batch size used for model rollouts.
-    compute_logps_micro_batch_size: The micro-batch size used for computing log
-      probabilities (e.g. for reference and old policy models).
+    actor_critic_share_backbone: Whether to share the backbone of the actor and
+      critic models.
+    training_micro_batch_size: The microbatch size used for training.
+    rollout_micro_batch_size: The microbatch size used for model rollouts. If
+      None, it defaults to `training_micro_batch_size`.
+    compute_logps_micro_batch_size: The microbatch size used for computing log
+      probabilities (e.g., for reference and old policy models). If None, it
+      defaults to `training_micro_batch_size`.
   """
 
   actor_optimizer: optax.GradientTransformation
   critic_optimizer: optax.GradientTransformation | None = None
   mini_batch_size: int | None = None
-  train_micro_batch_size: int | None = None
+  training_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
-    for name in [
-        "mini_batch_size",
-        "train_micro_batch_size",
-        "rollout_micro_batch_size",
-        "compute_logps_micro_batch_size",
-    ]:
-      rl_utils.check_positive(getattr(self, name), name)
 
+    # Verify all batch sizes are positive.
+    def _check_positive(value: int | None, name: str):
+      """Checks if the value is positive."""
+      if value is not None and value <= 0:
+        raise ValueError(f"{name} must be positive.")
+
+    _check_positive(self.mini_batch_size, "mini_batch_size")
+    _check_positive(self.training_micro_batch_size, "training_micro_batch_size")
+    _check_positive(self.rollout_micro_batch_size, "rollout_micro_batch_size")
+    _check_positive(
+        self.compute_logps_micro_batch_size, "compute_logps_micro_batch_size"
+    )
+
+    if self.gradient_accumulation_steps == 1:
+      self.gradient_accumulation_steps = None
+
+    # Verify `gradient_accumulation_steps` is None.
     if self.gradient_accumulation_steps is not None:
       raise ValueError(
           "For RL training, gradient_accumulation_steps should be None. It is "
-          "automatically derived from: "
-          "`mini_batch_size // train_micro_batch_size`."
+          "automatically inferred: "
+          "`mini_batch_size // training_micro_batch_size`."
       )
 
-    if self.train_micro_batch_size is not None:
-      if self.mini_batch_size is None:
-        raise ValueError(
-            "For RL training, `batch_size` and `mini_batch_size` must be set"
-            " when `train_micro_batch_size` is set."
+    self.training_micro_batch_size, self.gradient_accumulation_steps = (
+        _compute_batch_sizes(
+            self.training_micro_batch_size,
+            self.mini_batch_size,
+            "training_micro_batch_size",
+            "mini_batch_size",
+            ret_grad_acc=True,
         )
-      rl_utils.check_divisibility(
-          self.train_micro_batch_size,
-          self.mini_batch_size,
-          f"{self.train_micro_batch_size=}",
-          f"{self.mini_batch_size=}",
-      )
-      self.gradient_accumulation_steps = (
-          self.mini_batch_size // self.train_micro_batch_size
-      )
+    )
+
+    for batch_name in [
+        "rollout_micro_batch_size",
+        "compute_logps_micro_batch_size",
+    ]:
+      batch_size = getattr(self, batch_name)
+
+      if self.training_micro_batch_size is None and batch_size is not None:
+        raise ValueError(
+            f"For {batch_name}, training_micro_batch_size must be set when"
+            f" {batch_name} is set."
+        )
+      if batch_size is None:
+        batch_size = self.training_micro_batch_size
+        setattr(self, batch_name, batch_size)
+
+      if batch_size is not None:
+        rl_utils.check_batch_divisibility(
+            self.training_micro_batch_size,
+            batch_size,
+            "training_micro_batch_size",
+            batch_name,
+        )
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -206,16 +231,7 @@ class RLCluster:
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
     else:
-      rollout_data_type = (
-          self.cluster_config.rollout_config[Mode.TRAIN].data_type
-          if isinstance(self.cluster_config.rollout_config, dict)
-          else self.cluster_config.rollout_config.data_type
-      )
-      self.rollout_actor = self._load_model(
-          actor,
-          self.r2m[Role.ROLLOUT],
-          rollout_data_type,
-      )
+      self.rollout_actor = self._load_model(actor, self.r2m[Role.ROLLOUT])
 
     if reference:
       self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
@@ -286,12 +302,7 @@ class RLCluster:
 
     self._propagate_backbone_sharing_map()
 
-  def _load_model(
-      self,
-      model_or_path: ModelOrPath,
-      mesh: Mesh,
-      data_type: jnp.dtype | None = None,
-  ) -> nnx.Module:
+  def _load_model(self, model_or_path: ModelOrPath, mesh: Mesh) -> nnx.Module:
     """Loads model with given mesh to the given memory_kind.
 
     If input is already an NNX model, check if the model is sharded on the
@@ -329,15 +340,9 @@ class RLCluster:
             ),
             nnx.get_partition_spec(state),
         )
-        if data_type and data_type != jax.tree.leaves(state)[0].dtype:
-          tmp_state = jax.tree.map(lambda x: x.astype(data_type), state)
-        else:
-          tmp_state = state
         model_or_path = nnx.merge(
-            graph, reshard.reshard_pytree(tmp_state, dst_shardings)
+            graph, reshard.reshard_pytree(state, dst_shardings)
         )
-        del tmp_state
-        gc.collect()
       if is_on_device and self.cluster_config.offload_to_cpu:
         graph, state = nnx.split(model_or_path)
         new_params = rl_utils.put_params_on_memory_kind(state, "pinned_host")
@@ -622,19 +627,14 @@ class RLCluster:
 
   def generate(
       self,
-      prompts: list[str] | list[list[dict[str, str]]],
-      apply_chat_template: bool = False,
+      prompts: list[str],
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
     Args:
-      prompts: A list of prompts to generate text from. If
-        `apply_chat_template` is True, this should be a list of conversations
-        (each a list of dictionaries with 'role' and 'content'). Otherwise, it
-        should be a list of strings.
-      apply_chat_template: Whether to apply chat template to the prompts.
+      prompts: A list of prompts to generate text from.
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
@@ -642,26 +642,9 @@ class RLCluster:
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
     """
-    if apply_chat_template:
-      if self.tokenizer is None:
-        raise ValueError(
-            "Tokenizer must be initialized to use chat templates."
-        )
-      string_prompts = [
-          self.tokenizer.apply_chat_template(
-              m,  # pytype: disable=wrong-arg-types
-              add_generation_prompt=True,
-              tokenize=False,
-              enable_thinking=False,
-          )
-          for m in prompts
-      ]
-    else:
-      string_prompts = prompts  # pytype: disable=annotation-type-mismatch
-
-    if len(string_prompts) == 0:
+    if len(prompts) == 0:  # pylint: disable=g-explicit-length-test
       raise ValueError("Cannot generate from an empty list of prompts.")
-    micro_batch_size = micro_batch_size or len(string_prompts)
+    micro_batch_size = micro_batch_size or len(prompts)
 
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
@@ -675,9 +658,9 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config
 
       outputs = [
-          self.rollout.generate(string_prompts[s], rollout_config)
+          self.rollout.generate(prompts[s], rollout_config)
           for s in rl_utils.chunk_slices_by_size(
-              stop=len(string_prompts), step=micro_batch_size
+              stop=len(prompts), step=micro_batch_size
           )
       ]
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
@@ -764,7 +747,7 @@ class RLCluster:
     """Gets the per-token logps of the current policy model."""
     batch_size = prompt_tokens.shape[0]
     if batch_size == 0:
-      raise ValueError("Cannot get old log probabilities from an empty batch.")
+      return jnp.array([], dtype=jnp.float32)
     micro_batch_size = micro_batch_size or batch_size
 
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
@@ -843,3 +826,58 @@ class RLCluster:
           pad_id,
           eos_id,
       )
+
+
+def _compute_batch_sizes(
+    small_batch_size,
+    big_batch_size,
+    small_batch_size_name,
+    big_batch_size_name,
+    ret_grad_acc=False,
+):
+  """Computes and validates batch sizes.
+
+  There are four cases:
+  - big_batch_size: None, small_batch_size: None; allowed, grad_steps = 1.
+  - big_batch_size: None, small_batch_size: set; not allowed, since we cannot
+    if say, mini_batch_size is None, we want it to be equal to dataloader batch
+    size, which is available to us only during training. So, we cannot determine
+    `grad_accumulation_steps` here.
+  - big_batch_size: set, small_batch_size: None; allowed, grad_steps = 1.
+  -  Both set, in which case we check divisibility.
+
+  Args:
+    small_batch_size: The small batch size.
+    big_batch_size: The big batch size.
+    small_batch_size_name: The name of the small batch size.
+    big_batch_size_name: The name of the big batch size.
+    ret_grad_acc: Whether to return the gradient accumulation steps.
+
+  Returns:
+    The correct `small_batch_size` and `gradient_accumulation_steps`, if
+    `ret_grad_acc` is True.
+  """
+  if big_batch_size is None and small_batch_size is not None:
+    # Case 2
+    raise ValueError(
+        f"`{big_batch_size_name}` ({big_batch_size}) must be set if "
+        f"{small_batch_size_name}` ({small_batch_size}) is set."
+    )
+
+  # Case 1, 3
+  if small_batch_size is None:
+    small_batch_size = big_batch_size
+    if ret_grad_acc:
+      return small_batch_size, 1
+    return small_batch_size
+
+  # Case 4
+  rl_utils.check_batch_divisibility(
+      small_batch_size,
+      big_batch_size,
+      small_batch_size_name,
+      big_batch_size_name,
+  )
+  if ret_grad_acc:
+    return small_batch_size, big_batch_size // small_batch_size
+  return small_batch_size
