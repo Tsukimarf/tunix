@@ -107,8 +107,10 @@ class ShardingConfig:
   exp_weight_efd: Tuple[str | None, ...]
 
   @staticmethod
-  def get_default_sharding(is_sampling: bool = False):
+  def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
+    sp = 'sp' if (not is_sampling and enable_sp) else None
+    fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
         emb_vd=('tp', fsdp),
@@ -119,9 +121,9 @@ class ShardingConfig:
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
+        act_btd=('fsdp', sp, None if is_sampling else 'tp'),
+        act_btf=('fsdp', sp, 'tp'),
+        act_btnh=('fsdp', sp, 'tp', None),
         exp_weight_edf=('fsdp', None, 'tp'),
         exp_weight_efd=('fsdp', 'tp', None),
     )
@@ -558,6 +560,7 @@ class Attention(nnx.Module):
       )
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+      unsharded_seq = P(shd_b, shd_n, None, shd_h)
       kernel_spec = splash_attn_kernel.manual_sharding_spec(
           shd.NamedSharding(mesh, P(shd_n, shd_t))
       )
@@ -565,7 +568,7 @@ class Attention(nnx.Module):
       @partial(
           shard_map,
           mesh=mesh,
-          in_specs=(kernel_spec, shd_spec, shd_spec, shd_spec),
+          in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
           out_specs=shd_spec,
           check_rep=False,
       )
@@ -998,13 +1001,12 @@ class DecoderLayer(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.input_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
@@ -1016,7 +1018,7 @@ class DecoderLayer(nnx.Module):
         config.embed_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
@@ -1063,26 +1065,24 @@ class Qwen3(BackendMappingMixin, nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.config = config
     self.embedder = Embedder(
         vocab_size=config.vocab_size,
         embed_dim=config.embed_dim,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=self.config.shd_config,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
     self.layers = compat.ModuleList([
-        DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
-        for _ in range(config.num_layers)
+        DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
         norm_eps=config.norm_eps,
-        shd_config=shd_config,
+        shd_config=self.config.shd_config,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
@@ -1091,7 +1091,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
           einsum_str='BTD,DV->BTV',
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,
-          sharding=shd_config.emb_dv,
+          sharding=self.config.shd_config.emb_dv,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
