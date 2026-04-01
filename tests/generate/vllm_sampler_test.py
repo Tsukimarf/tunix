@@ -13,20 +13,14 @@
 # limitations under the License.
 
 import asyncio
-import concurrent.futures
-import functools
 import os
-import re
-import socket
 import tempfile
-import threading
 import time
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import jax
 import numpy as np
-import qwix
 import transformers
 from tunix.generate import mappings
 from tunix.generate import sampler as vanilla_sampler
@@ -36,8 +30,6 @@ from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.sft import utils as base_utils
 from tunix.tests import test_common as tc
-from vllm.inputs import TokensPrompt
-from vllm.sampling_params import SamplingParams
 import asyncio
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -97,7 +89,6 @@ class VllmSamplerTest(absltest.TestCase):
 
   def test_vllm_sampler_batch_mode_with_data_parallel(self):
     self._run_vllm_sampler(server_mode=False, data_parallel_size=2)
-    os.environ["NEW_MODEL_DESIGN"] = "False"
 
   def test_vllm_sampler_server_mode(self):
     self._run_vllm_sampler(server_mode=True)

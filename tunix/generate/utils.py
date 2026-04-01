@@ -718,6 +718,44 @@ def _apply_dtype_cast(
   return val
 
 
+def _sync_tied_lm_head_if_needed(
+    tgt_flat_list: List[Tuple[Tuple[str, ...], Any]],
+    transferred_target_keys: set[str],
+) -> None:
+  """Mirrors embed weights into lm_head when the target implies a tied head.
+
+  Some JAX/vLLM state layouts materialize `lm_head` as a separate destination
+  leaf even when the module graph ties it to `embed.embedding`. If the mapping
+  updates only `embed.embedding`, keep `lm_head` in sync unless `lm_head` was
+  actually transferred from the source state.
+
+  Args:
+    tgt_flat_list: A list of tuples, where each tuple contains the nested keys
+      and the corresponding target parameter.
+    transferred_target_keys: Target keys that were actually written during the
+      transfer loop.
+  """
+  if any(key.endswith('lm_head') for key in transferred_target_keys):
+    return
+
+  embed_param = None
+  lm_head_param = None
+  for flat_key, tgt_param in tgt_flat_list:
+    if flat_key[-1:] == ('embedding',):
+      embed_param = tgt_param
+    elif flat_key[-1:] == ('lm_head',):
+      lm_head_param = tgt_param
+
+  if embed_param is None or lm_head_param is None:
+    return
+  if not hasattr(embed_param, 'value') or not hasattr(lm_head_param, 'value'):
+    return
+  if embed_param.value.shape != lm_head_param.value.shape:
+    return
+
+  lm_head_param.value = embed_param.value
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
@@ -769,9 +807,10 @@ def transfer_state_with_mappings(
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  transferred_target_keys = set()
 
   # Transfer values with transformations
-  for (flat_src_key, _), (
+  for (flat_src_key, flat_tgt_key), (
       val,
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
@@ -792,6 +831,10 @@ def transfer_state_with_mappings(
 
     # Assign transformed value
     tgt_param.value = val
+    transferred_target_keys.add(flat_tgt_key)
+
+  # Target rollout engine might have different implementation and have materialized lm_head
+  _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
 
   # Clean up memory
   del unscanned_src_to_tgt_flat
@@ -835,7 +878,7 @@ def _unstack_scanned_param(
     key_path: The dot-separated path to the parameter for debugging.
 
   Returns:
-      A tuple of unstacked arrays, or a tuple containing just the original src_val 
+      A tuple of unstacked arrays, or a tuple containing just the original src_val
       if unstacking fails or is unnecessary.
   """
   if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
@@ -968,7 +1011,7 @@ def transfer_state_directly(
 
     filtered_src_flat = {}
     filtered_tgt_flat = {}
-    
+
     # Cache to store unstacked scanned arrays to avoid repeated work
     unstacked_cache = {}
 
