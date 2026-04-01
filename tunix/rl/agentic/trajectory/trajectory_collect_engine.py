@@ -67,7 +67,8 @@ class TrajectoryCollectEngine:
       timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
-      valid_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+      filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+      overlong_filter: bool = False,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
   ):
     """Initialize the trajectory collection engine.
@@ -93,8 +94,9 @@ class TrajectoryCollectEngine:
         tokenizer: Optional tokenizer for converting messages to token IDs. This
           is required if we want to track down `max_context_tokens`.
         chat_parser: Optional chat parser for formatting messages
-        valid_statuses (Set[TrajectoryStatus]): A set of statuses that are
-          considered not "penalized" for reward computation.
+        filter_statuses (Set[TrajectoryStatus]): A set of statuses that are
+          masked out for overlong filtering.
+        overlong_filter: Whether to filter overlong trajectories.
         perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
           to use for performance measurements. Defaults to a no-op tracer.
     """
@@ -112,9 +114,12 @@ class TrajectoryCollectEngine:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self._start_ts: float = 0.0
-    self.valid_statuses = valid_statuses or {
-        agent_types.TrajectoryStatus.SUCCEEDED
+    self.filter_statuses = filter_statuses or {
+        agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
+        agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+        agent_types.TrajectoryStatus.TIMEOUT,
     }
+    self.overlong_filter = overlong_filter
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
     self.env_time: float = 0.0
 
@@ -184,7 +189,12 @@ class TrajectoryCollectEngine:
           self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
         break
 
-    await self._append_final_reward()
+    masked_out = (
+        self.overlong_filter
+        and self.agent.trajectory.status in self.filter_statuses
+    )
+    if not masked_out:
+      await self._append_final_reward()
     self.compute_mc_reward()
     self.compute_trajectory_reward()
     await self._close()
@@ -239,15 +249,18 @@ class TrajectoryCollectEngine:
           logprobs.append(step.logprobs)
           if getattr(step, "env_tokens", None) is not None:
             logprobs.append(np.zeros(len(step.env_tokens)))
-
-      # TODO(sizhi): (b/484422277)
-      is_valid = self.agent.trajectory.status in self.valid_statuses
+      conversation_masks = np.concatenate(conversation_masks, axis=0)
+      final_masks = (
+          np.zeros_like(conversation_masks)
+          if masked_out
+          else conversation_masks
+      )
 
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
           "conversation_tokens": np.concatenate(conversation_tokens, axis=0),
-          "conversation_masks": np.concatenate(conversation_masks, axis=0),
+          "conversation_masks": final_masks,
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
@@ -271,6 +284,8 @@ class TrajectoryCollectEngine:
       max_context_limit: Optional[int] = None,
       timeout: float = 30.0,
       mode: str = "Trajectory",
+      filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+      overlong_filter: bool = True,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
   ) -> AsyncGenerator[Tuple[int, Any], None]:
     """Execute multiple agent-environment pairs concurrently.
@@ -287,8 +302,12 @@ class TrajectoryCollectEngine:
         max_context_limit (Optional[int]): Maximum context limit per episode
         timeout (float): Per-episode timeout in seconds
         mode (str): Output format. See `collect` method for options.
+        filter_statuses (Optional[Set[TrajectoryStatus]]): A set of statuses
+          that are masked out for filtering.
+        overlong_filter (bool): Whether to filter overlong trajectories.
         perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
           to use for performance measurements.
+
 
     Yields:
         Tuple[int, Any]: `(pair_index, result)`. The type of `result`
@@ -304,6 +323,8 @@ class TrajectoryCollectEngine:
           gamma=gamma,
           max_context_limit=max_context_limit,
           timeout=timeout,
+          filter_statuses=filter_statuses,
+          overlong_filter=overlong_filter,
           perf_v2=perf_v2,
       )
       traj = await engine.collect(mode=mode)

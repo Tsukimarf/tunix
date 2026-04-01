@@ -49,6 +49,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     self.mock_model_call = mock.Mock()
     self.mock_env.final_reward_fn = mock.Mock(return_value=0.5)
+    self.mock_final_reward_fn = self.mock_env.final_reward_fn
     self.mock_tokenizer = mock.Mock()
     self.mock_tokenizer.encode.return_value = [1, 2, 3]
     self.mock_chat_parser = mock.Mock()
@@ -510,6 +511,102 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     self.assertTrue(result_traj.steps[-1].done)
     self.assertEqual(result_traj.status, agent_types.TrajectoryStatus.TIMEOUT)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_overlong_filter_masks_out_and_skips_reward(self, mock_convert):
+    # Setup for MAX_STEPS_REACHED
+    self.mock_env.max_steps = 1
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, False, {}),  # Not done, so it hits max_steps
+    ]
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+        ([301], [1]),  # env tokens 1
+    ]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        overlong_filter=True,
+    )
+
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+    # Verify status is MAX_STEPS_REACHED
+    self.assertEqual(
+        token_data['status'], agent_types.TrajectoryStatus.MAX_STEPS_REACHED.name
+    )
+
+    # Verify final reward was NOT called
+    self.mock_final_reward_fn.assert_not_called()
+
+    # Verify masks are zeroed out
+    # Assistant tokens (201, 202) and Env tokens (301) should have masks [0, 0, 0]
+    expected_masks = np.array([0, 0, 0])
+    np.testing.assert_array_equal(token_data['conversation_masks'], expected_masks)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_overlong_filter_disabled_does_not_mask_out(self, mock_convert):
+    # Setup for MAX_STEPS_REACHED but with overlong_filter=False
+    self.mock_env.max_steps = 1
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, False, {}),
+    ]
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+        ([301], [1]),  # env tokens 1
+    ]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        overlong_filter=False,
+    )
+
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+    # Verify final reward WAS called
+    self.mock_final_reward_fn.assert_called_once()
+
+    # Verify masks are NOT zeroed out
+    expected_masks = np.array([1, 1, 1])
+    np.testing.assert_array_equal(token_data['conversation_masks'], expected_masks)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_overlong_filter_does_not_mask_out_on_success(self, mock_convert):
+    # Setup for SUCCEEDED
+    self.mock_env.max_steps = 5
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, True, {}),
+    ]
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+        ([301], [1]),  # env tokens 1
+    ]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        overlong_filter=True,
+    )
+
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+
+    # Verify status is SUCCEEDED
+    self.assertEqual(token_data['status'], agent_types.TrajectoryStatus.SUCCEEDED.name)
+
+    # Verify masks are NOT zeroed out
+    expected_masks = np.array([1, 1, 1])
+    np.testing.assert_array_equal(token_data['conversation_masks'], expected_masks)
 
 
 if __name__ == '__main__':
