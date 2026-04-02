@@ -73,6 +73,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
+    force_compute_kl: Whether to force compute KL divergence for logging
+      even when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
     loss_algo: "grpo" or "gspo-token".
@@ -80,6 +82,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     max_concurrency: Maximum number of concurrent rollout engines.
     off_policy_steps: Number of off-policy steps can be accepted before a policy
       update.
+    degenerate_group_masking: Whether to mask out degenerate groups with all-0
+      advantages.
   """
 
   algo_variant: str = "agentic_grpo"
@@ -95,6 +99,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
+  force_compute_kl: bool = False
   epsilon: float = 0.2
   system_prompt: str = ""
   max_concurrency: int = 16
@@ -239,7 +244,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "ppo_kl": np.mean,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
-        lambda: "kl" if self.algo_config.beta != 0.0 else None,
+        lambda: "kl"
+        if self.algo_config.force_compute_kl
+        or self.algo_config.beta != 0.0
+        else None,
     ])
 
   def _process_results(
@@ -397,7 +405,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if group_id is not None:
       perf_tags[perf_constants.GROUP_ID] = group_id
 
-    if self.algo_config.beta != 0.0:
+    if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0:
       with self.rl_cluster.perf_v2.span(
           perf_constants.REFERENCE_INFERENCE,
           devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
@@ -649,16 +657,19 @@ def grpo_loss_fn(
       "pg_clipfrac": clipped_fraction,
       "ppo_kl": ppo_kl,
   }
-  kl = common.compute_kl_divergence(
-      per_token_logps, train_example.ref_per_token_logps
-  )
-  # Log mean KL.
-  aux["kl"] = jnp.astype(
-      (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
-      jnp.float32,
-  )
-  if beta is not None and beta != 0.0:
-    per_token_loss = per_token_loss + beta * kl
+  # We do not alwayscompute KL divergence (e.g. when beta is 0.0 unless
+  # force_compute_kl is True).
+  if train_example.ref_per_token_logps is not None:
+    kl = common.compute_kl_divergence(
+        per_token_logps, train_example.ref_per_token_logps
+    )
+    # Log mean KL.
+    aux["kl"] = jnp.astype(
+        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+        jnp.float32,
+    )
+    if beta is not None and beta != 0.0:
+      per_token_loss = per_token_loss + beta * kl
 
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode

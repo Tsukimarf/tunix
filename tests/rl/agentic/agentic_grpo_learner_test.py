@@ -839,6 +839,114 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     params2 = nnx.state(model_resume, nnx.Param)
     jax.tree.map_with_path(test_common.assert_close, params1, params2)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="default_beta_zero",
+          beta=0.0,
+          force_compute_kl=False,
+          expect_ref_logps=False,
+      ),
+      dict(
+          testcase_name="force_kl_beta_zero",
+          beta=0.0,
+          force_compute_kl=True,
+          expect_ref_logps=True,
+      ),
+      dict(
+          testcase_name="beta_non_zero",
+          beta=0.1,
+          force_compute_kl=False,
+          expect_ref_logps=True,
+      ),
+  )
+  def test_force_compute_kl(self, beta, force_compute_kl, expect_ref_logps):
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        beta=beta,
+        force_compute_kl=force_compute_kl,
+        max_response_length=10,
+        num_generations=2,
+        num_iterations=1,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+
+    # Mock trajectories to pass into _process_results
+    class MockTraj:
+
+      def __init__(self, index):
+        self.traj = {
+            "conversation_text": [
+                {"role": "assistant", "content": f"msg {index}"}
+            ],
+            "conversation_tokens": np.array([1, 2, 3]),
+            "conversation_masks": np.array([1, 1, 1]),
+            "old_logprobs": None,
+            "policy_version": 0,
+            "trajectory_reward": 1.0,
+            "prompt_tokens": np.array([4, 5]),
+            "original_input": {"prompts": "hello"},
+            "group_id": "test_group",
+        }
+
+    trajectories = [MockTraj(0), MockTraj(1)]
+
+    with mock.patch.object(
+        rl_cluster,
+        "get_ref_per_token_logps",
+        return_value=jnp.zeros((2, 10)),
+    ) as mock_get_ref:
+      results = learner._process_results(trajectories, expected_step=1)
+      self.assertLen(results, 1)
+      train_example = results[0]
+
+      if expect_ref_logps:
+        mock_get_ref.assert_called_once()
+        self.assertIsNotNone(train_example.ref_per_token_logps)
+      else:
+        mock_get_ref.assert_not_called()
+        self.assertIsNone(train_example.ref_per_token_logps)
+
   def test_exception_handling(self):
     vocab = test_common.MockVocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
