@@ -193,12 +193,19 @@ class PerfettoTraceWriter(TraceWriter):
     if timeline_utils.is_host_timeline(tl_id):
       return None
 
+    cluster_roles = []
     for role, devices in self._role_to_devices.items():
       for device in devices:
         device_str = timeline_utils.generate_device_timeline_id(device)
-        if device_str == tl_id:
-          camel_role = "".join(word.capitalize() for word in role.split("_"))
-          return f"{camel_role} Cluster"
+        if device_str == tl_id and role not in cluster_roles:
+          cluster_roles.append(role)
+
+    if cluster_roles:
+      camel_roles = [
+          "".join(word.capitalize() for word in role.split("_"))
+          for role in cluster_roles
+      ]
+      return f"{', '.join(camel_roles)} Cluster"
     return None
 
   def write(self, builder: TraceProtoBuilder) -> None:

@@ -298,7 +298,11 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
     with tempfile.TemporaryDirectory() as tmp_dir:
       writer = trace_writer_lib.PerfettoTraceWriter(
-          trace_dir=tmp_dir, role_to_devices={"actor": ["tpu0", "tpu1"]}
+          trace_dir=tmp_dir,
+          role_to_devices={
+              "actor": ["tpu0", "tpu1"],
+              "rollout": ["tpu0"],
+          },
       )
 
       t_main = tracer.Timeline("host-1", 1000.0)
@@ -310,18 +314,24 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       t_tpu = tracer.Timeline("tpu0", 1000.0)
       t_tpu.start_span("compute", 1003.0)
 
+      t_tpu1 = tracer.Timeline("tpu1", 1000.0)
+      t_tpu1.start_span("compute2", 1004.0)
+
       writer.write_timelines({
           "host-1": t_main,
           "host-2": t_rollout,
           "tpu0": t_tpu,
+          "tpu1": t_tpu1,
       })
 
     main_group = captured_packets[0].track_descriptor
     rollout_group = captured_packets[1].track_descriptor
-    tpu_group = captured_packets[2].track_descriptor
-    host_1 = captured_packets[3].track_descriptor
-    host_2 = captured_packets[4].track_descriptor
-    tpu0 = captured_packets[5].track_descriptor
+    tpu0_group = captured_packets[2].track_descriptor
+    tpu1_group = captured_packets[3].track_descriptor
+    host_1 = captured_packets[4].track_descriptor
+    host_2 = captured_packets[5].track_descriptor
+    tpu0 = captured_packets[6].track_descriptor
+    tpu1 = captured_packets[7].track_descriptor
 
     with self.subTest("host_main_threads_group"):
       self.assertEqual(main_group.name, "Host - Main threads")
@@ -331,8 +341,11 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       self.assertEqual(rollout_group.name, "Host - Rollout threads")
       self.assertEqual(rollout_group.uuid, 100001)
 
+    with self.subTest("actor_rollout_cluster"):
+      self.assertEqual(tpu0_group.name, "Actor, Rollout Cluster")
+
     with self.subTest("actor_cluster"):
-      self.assertEqual(tpu_group.name, "Actor Cluster")
+      self.assertEqual(tpu1_group.name, "Actor Cluster")
 
     with self.subTest("host_1"):
       self.assertEqual(host_1.name, "host-1")
@@ -344,7 +357,11 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
     with self.subTest("tpu0"):
       self.assertEqual(tpu0.name, "tpu0")
-      self.assertEqual(tpu0.parent_uuid, tpu_group.uuid)
+      self.assertEqual(tpu0.parent_uuid, tpu0_group.uuid)
+
+    with self.subTest("tpu1"):
+      self.assertEqual(tpu1.name, "tpu1")
+      self.assertEqual(tpu1.parent_uuid, tpu1_group.uuid)
 
   def test_perfetto_trace_writer_integration(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
