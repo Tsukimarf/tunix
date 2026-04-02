@@ -149,7 +149,7 @@ training_config: &base_training_config
     # custom_export_fn_path = the path to the custom export function for the v1 perf metrics.
     # custom_export_fn_path_v2 = the path to the custom export function for the v2 perf metrics (experimental).
     # enable_trace_writer = whether to enable writing out the trace for visualization (enabled by default).
-    # log_dir = the directory to save the trace files.
+    # trace_dir = the directory to save the trace files.
   perf_metrics_options: {}
   profiler_options:
     log_dir: "/tmp/profiling"
