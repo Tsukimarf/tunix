@@ -102,6 +102,11 @@ num_test_batches: 100
 # data_dir used will be set to `None` and chosen by default by tfds.
 tfds_download: True
 
+# You could leave this as 0, and the num_batches will be auto calculated as
+# floor(dataset_length / batch_size). Set to a positive integer to cap the
+# number of batches used per epoch.
+num_batches: 0
+
 ############################### Optimizer ###############################
 # Optimizer config
 optimizer_config: &base_optimizer_config
