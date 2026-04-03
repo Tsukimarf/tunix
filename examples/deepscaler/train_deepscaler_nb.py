@@ -105,6 +105,12 @@ arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument(
+    "--loss_agg_mode", type=str, default="token-mean"
+)
+arg_parser.add_argument(
+    "--kl_loss_mode", type=str, default="low_var_kl"
+)
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -575,6 +581,8 @@ grpo_config = GRPOConfig(
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
+    loss_agg_mode=args.loss_agg_mode,
+    kl_loss_mode=args.kl_loss_mode,
 )
 
 # Perf Metrics logging

@@ -73,6 +73,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
+    kl_loss_mode: Method for computing the KL loss.
     force_compute_kl: Whether to force compute KL divergence for logging
       even when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
@@ -99,6 +100,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
+  kl_loss_mode: str = "kl"
   force_compute_kl: bool = False
   epsilon: float = 0.2
   system_prompt: str = ""
@@ -661,7 +663,9 @@ def grpo_loss_fn(
   # force_compute_kl is True).
   if train_example.ref_per_token_logps is not None:
     kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
+        per_token_logps,
+        train_example.ref_per_token_logps,
+        algo_config.kl_loss_mode,
     )
     # Log mean KL.
     aux["kl"] = jnp.astype(
