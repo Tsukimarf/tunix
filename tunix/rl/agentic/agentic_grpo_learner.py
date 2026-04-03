@@ -574,6 +574,11 @@ def grpo_loss_fn(
       if hasattr(algo_config, "epsilon_high")
       else epsilon
   )
+  epsilon_c = (
+      algo_config.epsilon_c
+      if hasattr(algo_config, "epsilon_c")
+      else 3.0
+  )
   loss_aggregation_mode = algo_config.loss_agg_mode
 
   completion_ids, completion_mask = (
@@ -652,12 +657,33 @@ def grpo_loss_fn(
       jnp.greater(pg_loss_2, pg_loss_1), completion_mask
   )
 
-  pg_loss = ppo_helpers.masked_mean(per_token_loss, completion_mask)
+  # dual-clip ppo loss
+  pg_loss_3 = -epsilon_c * advantages
+
+  # pg_clipfrac_lower measures how often dual-clip ppo kicks in.
+  # It kicks in when the standard clipped loss is larger than pg_loss_3
+  # for instances with negative advantages.
+  unreduced_pg_clipfrac_lower = (
+      (per_token_loss > pg_loss_3) & (advantages < 0.0)
+  ).astype(jnp.float32)
+  pg_clipfrac_lower = common.aggregate_loss(
+      unreduced_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+  )
+
+  pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
+  per_token_loss = jnp.where(
+      advantages < 0.0, pg_loss_clipped_dual, per_token_loss
+  )
+  loss = common.aggregate_loss(
+      per_token_loss, completion_mask, loss_aggregation_mode
+  )
   aux = {
       "kl": 0.0,
-      "pg_loss": pg_loss,
+      "kl_loss": 0.0,
+      "pg_loss": loss,
       "pg_clipfrac": clipped_fraction,
       "ppo_kl": ppo_kl,
+      "pg_clipfrac_lower": pg_clipfrac_lower,
   }
   # We do not alwayscompute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
@@ -672,14 +698,17 @@ def grpo_loss_fn(
         (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
         jnp.float32,
     )
+    kl_loss = common.aggregate_loss(
+        kl, completion_mask, loss_aggregation_mode
+    )
+    aux["kl_loss"] = kl_loss
     if beta is not None and beta != 0.0:
-      per_token_loss = per_token_loss + beta * kl
+      loss = loss + beta * kl_loss
 
-  loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
-  )
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
-  entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
+  entropy_loss = common.aggregate_loss(
+      token_entropy, completion_mask, loss_aggregation_mode
+  )
   aux["entropy"] = entropy_loss
 
   return loss, aux
