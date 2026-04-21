@@ -244,7 +244,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         agent=self.mock_agent,
         env=self.mock_env,
         model_call=self.mock_model_call,
-        max_context_limit=1024,
+        max_response_length=1024,
     )
     conversation = asyncio.run(self._run_collect(engine, mode='Conversation'))
 
@@ -270,7 +270,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         model_call=self.mock_model_call,
         tokenizer=self.mock_tokenizer,
         chat_parser=self.mock_chat_parser,
-        max_context_limit=1024,
+        max_response_length=1024,
     )
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
     expected_tokens = {
@@ -357,7 +357,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         model_call=self.mock_model_call,
         tokenizer=self.mock_tokenizer,
         chat_parser=self.mock_chat_parser,
-        max_context_limit=1024,
+        max_response_length=1024,
     )
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
     self.assertEmpty(self.mock_agent.trajectory.steps)
@@ -491,13 +491,22 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_status_max_context_limit_reached(self, mock_convert):
-    # 100 prompt + 100 step = 200 > 150. Should stop after 1 step.
+    # 100 assistant + 100 env = 200 > 150. Should stop after 1 step.
     mock_convert.side_effect = [
         ([1] * 100, [1] * 100),  # prompt tokens
         ([1] * 100, [1] * 100),  # assistant tokens 1
         ([1] * 100, [1] * 100),  # env tokens 1
     ]
     # Setup specific for this test
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['response1'],
+            logits=[np.zeros((100,))],
+            tokens=[np.array([1] * 100)],
+            left_padded_prompt_tokens=np.array([1]),
+            logprobs=[np.ones((100,))],
+        )
+    ]
     self.mock_env.max_steps = 5
     self.mock_chat_parser.parse.return_value = 'mock_parsed_text'
 
@@ -507,7 +516,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         model_call=self.mock_model_call,
         tokenizer=self.mock_tokenizer,
         chat_parser=self.mock_chat_parser,
-        max_context_limit=150,
+        max_response_length=150,
     )
 
     result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
@@ -517,7 +526,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         result_traj.status,
         agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
     )
-    # 100 prompt + 100 step = 200 > 150. Should stop after 1 step.
+    # 100 step = 100 > 150. Should stop after 1 step.
     self.assertLen(result_traj.steps, 1)
 
   def test_collect_max_steps_reached(self):
@@ -556,7 +565,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           agent=self.mock_agent,
           env=self.mock_env,
           model_call=self.mock_model_call,
-          max_context_limit=1024,
+          max_response_length=1024,
           timeout=0.1,
       )
       result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
