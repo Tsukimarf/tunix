@@ -206,10 +206,64 @@ train_fraction: 1.0
 
 class DispatchTest(absltest.TestCase):
 
+  def test_agentic_data_module_receives_data_config_for_raw_dataset(self):
+    extra = """
+training_mode: "agentic_grpo"
+data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
+data_config:
+  train_data_path: "gs://fake/train.json"
+  eval_data_path: "gs://fake/eval.parquet"
+prompt_key: "prompts"
+reward_functions: []
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+  context_ratio: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    pipeline = _make_pipeline(extra)
+    fake_module = mock.Mock(batch_fn=mock.sentinel.batch_fn)
+
+    with mock.patch.object(
+        pipeline, "_get_data_module", return_value=fake_module
+    ):
+      with mock.patch.object(
+          pipeline,
+          "_get_dataset",
+          return_value=mock.sentinel.dataset,
+      ) as get_dataset:
+        dataset, batch_fn = pipeline._load_raw_dataset(mock.sentinel.tokenizer)
+
+    self.assertIs(dataset, mock.sentinel.dataset)
+    self.assertIs(batch_fn, mock.sentinel.batch_fn)
+    get_dataset.assert_called_once_with(
+        mock.sentinel.tokenizer,
+    )
+
   def test_agentic_nullable_string_can_be_overridden_from_cli(self):
     extra = """
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
 data_config:
   train_data_path: "gs://fake/train.json"
   eval_data_path: "gs://fake/eval.parquet"
@@ -253,6 +307,7 @@ vllm_config:
     extra = """
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
 data_config:
   train_data_path: "gs://fake/train.json"
   eval_data_path: "gs://fake/eval.parquet"
@@ -302,6 +357,7 @@ vllm_config:
     extra = """
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
 data_config:
   train_data_path: "gs://fake/train.json"
   eval_data_path: "gs://fake/eval.parquet"
@@ -365,6 +421,7 @@ verl_compatible: false
     extra = """
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
 data_config:
   train_data_path: "gs://fake/train.json"
   eval_data_path: "gs://fake/eval.parquet"
@@ -459,6 +516,7 @@ class RolloutConfigTest(absltest.TestCase):
     extra = f"""
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
 data_config:
   train_data_path: "gs://fake/train.json"
   eval_data_path: "gs://fake/eval.parquet"
@@ -531,6 +589,7 @@ class AgenticConfigTest(absltest.TestCase):
     return f"""
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
 data_config:
   train_data_path: "gs://fake/train.json"
   eval_data_path: "gs://fake/eval.parquet"
@@ -592,6 +651,7 @@ class SplitMeshConfigTest(absltest.TestCase):
     extra = """
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
 data_config:
   train_data_path: "gs://fake/train.json"
   eval_data_path: "gs://fake/eval.parquet"
