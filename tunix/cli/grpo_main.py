@@ -588,17 +588,28 @@ class GrpoPipeline(config.HyperParameters):
     return self.data_module
 
   def _get_dataset(self, tokenizer):
+    apply_chat_template_to_dataset = self.config.get(
+        "apply_chat_template_to_dataset"
+    )
+    if apply_chat_template_to_dataset is None:
+      raise ValueError(
+          "apply_chat_template_to_dataset must be set."
+      )
+
     if self.config.get("data_module", None):
       data_module = self.config.get("data_module", None)
       dataset = data_lib.get_dataset_from_module(
           data_module,
           tokenizer,
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
+          **(self.config.get("data_config") or {}),
       )
     elif self.config["data_source"] == "local":
       dataset = example_data.create_dataset(
           data_source=self.config["data_source"],
           dataset=self.config["data_directory"],
           tokenizer=tokenizer,
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     elif self.config["data_source"] == "tfds":
       dataset = example_data.create_dataset(
@@ -606,6 +617,7 @@ class GrpoPipeline(config.HyperParameters):
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
           split=self.config.get("train_split", self.config.get("split", "train")),
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     elif self.config["data_source"] == "huggingface":
       dataset = example_data.create_dataset(
@@ -613,6 +625,7 @@ class GrpoPipeline(config.HyperParameters):
           dataset=self.config["dataset_name"],
           tokenizer=tokenizer,
           split=self.config.get("train_split", self.config.get("split", "train")),
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     else:
       raise ValueError(f"Unsupported data_source {self.config['data_source']}")
@@ -670,10 +683,10 @@ class GrpoPipeline(config.HyperParameters):
     The module must expose ``create_dataset(**data_config) -> grain.MapDataset``
     and optionally a ``batch_fn`` used as ``custom_batch_fn``.
     """
-    dataset = self._get_dataset(tokenizer)
     data_module = (
-      self._get_data_module() if self.config.get("data_module", None) else None
+        self._get_data_module() if self.config.get("data_module", None) else None
     )
+    dataset = self._get_dataset(tokenizer)
     batch_fn = getattr(data_module, "batch_fn", None) if data_module else None
     return dataset, batch_fn
 
@@ -710,6 +723,7 @@ class GrpoPipeline(config.HyperParameters):
     chat_parser = self._create_chat_parser(tokenizer)
 
     raw_dataset, custom_batch_fn = self._load_raw_dataset(tokenizer)
+
     self.compute_params(raw_dataset)
 
     dataset, _ = data_lib.post_init_dataset(
