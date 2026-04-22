@@ -158,6 +158,9 @@ class RolloutConfig:
   # Maximum number of concurrent sequences allowed to be processed in vLLM.
   rollout_vllm_max_num_seqs: Optional[int] = None
 
+  # Numbers of keys to reshard at a time when synchronizing weights between trainer and vLLM model.
+  rollout_vllm_reshard_chunk_size: Optional[int] = None
+
   # Additional keyword arguments forwarded directly to the vLLM engine constructor.
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
