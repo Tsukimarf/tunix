@@ -19,6 +19,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable, Mapping
 import dataclasses
+import itertools
 import time
 from typing import Any
 
@@ -239,13 +240,13 @@ class PerfettoTraceWriter(TraceWriter):
         continue
 
       tl = timelines[tl_id]
-      if not tl.spans:
+      if not any(tl.committed_steps):
         continue
 
       if timeline_utils.is_host_timeline(tl_id):
         # Rollout only timelines threads.
         if timeline_utils.is_timeline_only_of_allowed_type(
-            tl, [perf_constants.ROLLOUT]
+            tl, [perf_constants.ROLLOUT], include_cur_step=False
         ):
           self._track_info["host_rollout"] = TrackInfo(
               name="Host - Rollout threads",
@@ -276,6 +277,9 @@ class PerfettoTraceWriter(TraceWriter):
     if not timelines:
       return
 
+    if not any(any(tl.committed_steps) for tl in timelines.values()):
+      return
+
     builder = TraceProtoBuilder()
 
     self._init_tracks(timelines)
@@ -294,7 +298,7 @@ class PerfettoTraceWriter(TraceWriter):
     for tl_id in sorted_ids:
       tl = timelines[tl_id]
 
-      if not tl.spans:
+      if not any(tl.committed_steps):
         continue
 
       # Assign a UUID to the timeline if it hasn't been assigned one yet. Offset
@@ -313,7 +317,14 @@ class PerfettoTraceWriter(TraceWriter):
         track_info = self._track_info[self._timeline_tracks[tl_id]]
         packet.track_descriptor.parent_uuid = track_info.uuid
 
-      lane_by_span_id, num_lanes = _assign_lanes(tl.spans.values())
+      # TODO: noghabi -  limit processing to last steps. we don't need to start
+      # from the beginning every time.
+      all_spans = list(
+          itertools.chain.from_iterable(
+              step.values() for step in tl.committed_steps
+          )
+      )
+      lane_by_span_id, num_lanes = _assign_lanes(all_spans)
 
       if num_lanes > 1:
         # Emit track descriptors for each lane so they group under the timeline
@@ -324,7 +335,7 @@ class PerfettoTraceWriter(TraceWriter):
           packet.track_descriptor.parent_uuid = tl_uuid
           packet.track_descriptor.name = ""  # empty name for lanes
 
-      for s in tl.spans.values():
+      for s in all_spans:
         lane_idx = lane_by_span_id[s.id]
         lane_uuid = tl_uuid if num_lanes <= 1 else (tl_uuid + lane_idx + 1)
 

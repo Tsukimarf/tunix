@@ -99,11 +99,11 @@ class PerfTracerTest(absltest.TestCase):
     with t.span("host_only"):
       pass
 
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
     self.assertLen(timelines, 1)  # Just host
     [host_id] = timelines.keys()
     self.assertStartsWith(host_id, "host-")
-    self.assertLen(timelines[host_id].spans, 1)
+    self.assertLen(timelines[host_id].cur_step, 1)
 
   def test_tracer_with_devices_and_tags(self):
     d1 = MockDevice("tpu", 0)
@@ -121,20 +121,20 @@ class PerfTracerTest(absltest.TestCase):
     tags = {"key": "value", "step": 100}
     with t.span("op_with_tags", devices=[d1], tags=tags) as span:
       span.async_end(["future"])
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
 
     with self.subTest("host_timeline"):
       host_tl = timelines[t._main_thread_id]
-      self.assertLen(host_tl.spans, 1)
-      self.assertEqual(host_tl.spans[0].name, "op_with_tags")
-      self.assertEqual(host_tl.spans[0].tags, tags)
+      self.assertLen(host_tl.cur_step, 1)
+      self.assertEqual(host_tl.cur_step[0].name, "op_with_tags")
+      self.assertEqual(host_tl.cur_step[0].tags, tags)
 
     with self.subTest("device_timeline"):
       self.assertIn("tpu0", timelines)
       dev_tl = timelines["tpu0"]
-      self.assertLen(dev_tl.spans, 1)
-      self.assertEqual(dev_tl.spans[0].name, "op_with_tags")
-      self.assertEqual(dev_tl.spans[0].tags, tags)
+      self.assertLen(dev_tl.cur_step, 1)
+      self.assertEqual(dev_tl.cur_step[0].name, "op_with_tags")
+      self.assertEqual(dev_tl.cur_step[0].tags, tags)
 
   def test_tracer_with_multiple_devices(self):
     d1 = MockDevice("tpu", 0)
@@ -156,7 +156,7 @@ class PerfTracerTest(absltest.TestCase):
     with t.span("multi_dev_op", devices=[d1, d2]) as span:
       span.async_end(["future"])
 
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
 
     with self.subTest("Timeline availability"):
       self.assertIn("tpu0", timelines)
@@ -171,10 +171,10 @@ class PerfTracerTest(absltest.TestCase):
       self.assertEqual(tl1.born, host_tl.born)
 
     with self.subTest("Device spans"):
-      self.assertLen(tl1.spans, 1)
-      self.assertLen(tl2.spans, 1)
-      self.assertEqual(tl1.spans[0].name, "multi_dev_op")
-      self.assertEqual(tl2.spans[0].name, "multi_dev_op")
+      self.assertLen(tl1.cur_step, 1)
+      self.assertLen(tl2.cur_step, 1)
+      self.assertEqual(tl1.cur_step[0].name, "multi_dev_op")
+      self.assertEqual(tl2.cur_step[0].name, "multi_dev_op")
 
   def test_tracer_collect_on_one_device(self):
     d1 = MockDevice("tpu", 0)
@@ -194,16 +194,18 @@ class PerfTracerTest(absltest.TestCase):
     with t.span("multi_dev_op", devices=[d1, d2]) as span:
       span.async_end(["future"])
 
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
     self.assertIn("tpu0", timelines)
     self.assertIn("tpu1", timelines)
 
     tl1 = timelines["tpu0"]
     tl2 = timelines["tpu1"]
 
-    self.assertLen(tl1.spans, 1, msg="Only the first device should have a span")
-    self.assertEqual(tl1.spans[0].name, "multi_dev_op")
-    self.assertEmpty(tl2.spans)
+    self.assertLen(
+        tl1.cur_step, 1, msg="Only the first device should have a span"
+    )
+    self.assertEqual(tl1.cur_step[0].name, "multi_dev_op")
+    self.assertEmpty(tl2.cur_step)
 
   def test_tracer_with_multidim_devices(self):
     d1 = MockDevice("tpu", 0)
@@ -219,11 +221,11 @@ class PerfTracerTest(absltest.TestCase):
     with t.span("multidim_op", devices=arr_devices):
       pass
 
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
     self.assertIn("tpu0", timelines)
     self.assertIn("tpu1", timelines)
-    self.assertLen(timelines["tpu0"].spans, 1)
-    self.assertLen(timelines["tpu1"].spans, 1)
+    self.assertLen(timelines["tpu0"].cur_step, 1)
+    self.assertLen(timelines["tpu1"].cur_step, 1)
 
   def test_nested_host_spans_with_devices(self):
     d1 = "gpu0"
@@ -242,16 +244,18 @@ class PerfTracerTest(absltest.TestCase):
       with t.span("inner", devices=[d1]) as s2:
         s2.async_end(["w2"])
 
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
     host_tl = timelines[t._main_thread_id]
     dev_tl = timelines[d1]
 
-    self.assertLen(host_tl.spans, 2)
-    self.assertLen(dev_tl.spans, 2)
+    host_cur_step = host_tl.cur_step.values()
+    dev_cur_step = dev_tl.cur_step.values()
+    self.assertLen(host_cur_step, 2)
+    self.assertLen(dev_cur_step, 2)
 
     # Verify IDs match implicit sequential ordering for device.
     # Because 'inner' context manager exits first, it is recorded first (ID=0).
-    inner_span, outer_span = dev_tl.spans.values()
+    inner_span, outer_span = dev_cur_step
     self.assertEqual(inner_span.name, "inner")
     self.assertEqual(outer_span.name, "outer")
 
@@ -271,12 +275,12 @@ class PerfTracerTest(absltest.TestCase):
     t1.join()
     t2.join()
 
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
     # Main thread + 2 worker threads
     self.assertLen(timelines, 3)
 
     # Verify each has 1 span
-    span_counts = [len(tl.spans) for tl in timelines.values()]
+    span_counts = [len(tl.cur_step) for tl in timelines.values()]
     # Main thread created in init has 0 spans, workers have 1 each
     self.assertEqual(sorted(span_counts), [0, 1, 1])
 
@@ -380,13 +384,23 @@ class PerfTracerTest(absltest.TestCase):
     d0 = MockDevice("tpu", 0)
     t = tracer.PerfTracer(devices=[d0])
 
-    with mock.patch.object(
-        timeline.Timeline, "commit_step", autospec=True
-    ) as mock_commit:
-      t.commit_timelines()
+    def immediate_success(
+        waitlist: Any, success: Callable[[], None], failure: Callable[[], None]
+    ) -> mock.Mock:
+      success()
+      return mock.create_autospec(threading.Thread, instance=True)
 
-      # Should be called once for host timeline and once for device timeline
-      self.assertEqual(mock_commit.call_count, 2)
+    self.mock_async_wait.side_effect = immediate_success
+
+    with t.span("test_span", devices=[d0]) as span:
+      span.async_end(["future"])
+
+    t.commit_timelines()
+
+    timelines = t._get_timelines()
+    # Host timeline and device timeline should both have one committed step
+    for tl in timelines.values():
+      self.assertLen(tl.committed_steps, 1)
 
 
 class AdvancedPerfTracerTest(absltest.TestCase):
@@ -427,14 +441,15 @@ class AdvancedPerfTracerTest(absltest.TestCase):
     ):
       self.controller.trigger(1)  # Index 1 is B
 
-    dev_timeline = t._get_timeline_snapshots()["tpu0"]
+    dev_timeline = t._get_timelines()["tpu0"]
+    dev_cur_step = dev_timeline.cur_step
     with self.subTest("Span B completion"):
-      self.assertLen(dev_timeline.spans, 1)
+      self.assertLen(dev_cur_step, 1)
       # Verify B is complete and A (ID 0) is NOT complete (still pending)
-      self.assertIn(1, dev_timeline.spans)
-      self.assertNotIn(0, dev_timeline.spans)
-      self.assertEqual(dev_timeline.spans[1].name, "B")
-      self.assertEqual(dev_timeline.spans[1].end, 100.0)
+      self.assertIn(1, dev_cur_step)
+      self.assertNotIn(0, dev_cur_step)
+      self.assertEqual(dev_cur_step[1].name, "B")
+      self.assertEqual(dev_cur_step[1].end, 100.0)
 
     # 4. Complete Span A
     with mock.patch.object(
@@ -442,16 +457,16 @@ class AdvancedPerfTracerTest(absltest.TestCase):
     ):
       self.controller.trigger(0)  # Index 0 is A
 
-    dev_timeline = t._get_timeline_snapshots()["tpu0"]
+    dev_cur_step = dev_timeline.cur_step
     with self.subTest("Span A completion"):
-      self.assertLen(dev_timeline.spans, 2)
-      self.assertEqual(dev_timeline.spans[0].name, "A")
-      self.assertEqual(dev_timeline.spans[0].end, 101.0)
+      self.assertLen(dev_cur_step, 2)
+      self.assertEqual(dev_cur_step[0].name, "A")
+      self.assertEqual(dev_cur_step[0].end, 101.0)
 
     # Verify IDs (sequential based on start order)
     with self.subTest("Sequential span IDs"):
-      self.assertEqual(dev_timeline.spans[0].id, 0)
-      self.assertEqual(dev_timeline.spans[1].id, 1)
+      self.assertEqual(dev_cur_step[0].id, 0)
+      self.assertEqual(dev_cur_step[1].id, 1)
 
   def test_host_nesting_and_device_flatness(self):
     """Tests correct nesting on host vs flat structure on device."""
@@ -465,21 +480,21 @@ class AdvancedPerfTracerTest(absltest.TestCase):
         s_child.async_end(["w_child"])
       s_root.async_end(["w_root"])
 
-    timelines = t._get_timeline_snapshots()
+    timelines = t._get_timelines()
     host_tl = timelines[t._main_thread_id]
     dev_tl = timelines["tpu0"]
 
     with self.subTest("Spans before sync"):
-      self.assertLen(host_tl.spans, 2)
-      self.assertEmpty(dev_tl.spans)
+      self.assertLen(host_tl.cur_step, 2)
+      self.assertEmpty(dev_tl.cur_step)
       self.assertLen(self.controller.tasks, 2)
 
     self.controller.trigger_all()
     t.synchronize()
 
     # Check Host Nesting
-    host_root = host_tl.spans[0]
-    host_child = host_tl.spans[1]
+    host_root = host_tl.cur_step[0]
+    host_child = host_tl.cur_step[1]
 
     with self.subTest("Host nesting"):
       self.assertEqual(host_root.name, "Root")
@@ -491,14 +506,10 @@ class AdvancedPerfTracerTest(absltest.TestCase):
     # 2. Enter Child (Host Start)
     # 3. Exit Child (Host End, Device Submit Child)
     # 4. Exit Root (Host End, Device Submit Root)
-
-    # Re-fetch device snapshot after synchronization
-    dev_tl = t._get_timeline_snapshots()["tpu0"]
-    d_first = dev_tl.spans[0]
-    d_second = dev_tl.spans[1]
-
+    d_first = dev_tl.cur_step[0]
+    d_second = dev_tl.cur_step[1]
     with self.subTest("Device flatness"):
-      self.assertLen(dev_tl.spans, 2)
+      self.assertLen(dev_tl.cur_step, 2)
       self.assertEqual(d_first.name, "Child")
       self.assertEqual(d_second.name, "Root")
       # Verify no parent relationship on device timeline
@@ -530,11 +541,12 @@ class AdvancedPerfTracerTest(absltest.TestCase):
     self.controller.trigger_all()
     t.synchronize()
 
-    dev_tl = t._get_timeline_snapshots()["tpu0"]
-    self.assertLen(dev_tl.spans, total_spans)
+    dev_tl = t._get_timelines()["tpu0"]
+    dev_cur_step = dev_tl.cur_step
+    self.assertLen(dev_cur_step, total_spans)
 
     # Check IDs are sequential 0 to N-1
-    ids = sorted(dev_tl.spans.keys())
+    ids = sorted(dev_cur_step.keys())
     self.assertEqual(ids, list(range(total_spans)))
 
 

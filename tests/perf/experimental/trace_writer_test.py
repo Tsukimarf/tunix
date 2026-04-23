@@ -121,6 +121,7 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
           },
       )
       t.stop_span(1002.0)
+      t.commit_step()
 
       writer.write_timelines({"timeline_test": t})
 
@@ -192,6 +193,8 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       span3 = tracer.Span(name="span_3", begin=1006.0, id=3)
       span3.end = 1010.0
       t._cur_step[3] = span3
+
+      t.commit_step()
 
       writer.write_timelines({"overlap_timeline": t})
 
@@ -307,22 +310,29 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
       t_main = tracer.Timeline("host-1", 1000.0)
       t_main.start_span("main_span", 1001.0)
+      t_main.stop_span(1002.0)
 
       t_rollout = tracer.Timeline("host-2", 1000.0)
       t_rollout.start_span("rollout", 1002.0)
+      t_rollout.stop_span(1003.0)
 
       t_tpu = tracer.Timeline("tpu0", 1000.0)
       t_tpu.start_span("compute", 1003.0)
+      t_tpu.stop_span(1004.0)
 
       t_tpu1 = tracer.Timeline("tpu1", 1000.0)
       t_tpu1.start_span("compute2", 1004.0)
+      t_tpu1.stop_span(1005.0)
 
-      writer.write_timelines({
+      timelines = {
           "host-1": t_main,
           "host-2": t_rollout,
           "tpu0": t_tpu,
           "tpu1": t_tpu1,
-      })
+      }
+      for tl in timelines.values():
+        tl.commit_step()
+      writer.write_timelines(timelines)
 
     main_group = captured_packets[0].track_descriptor
     rollout_group = captured_packets[1].track_descriptor
@@ -382,6 +392,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
       timelines = {"timeline1": t1, "timeline_tags": t2}
 
+      for tl in timelines.values():
+        tl.commit_step()
+
       writer.write_timelines(timelines)
 
       # Check if file was created and has content
@@ -425,6 +438,14 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       # No content should be written.
       self.assertEmpty(files)
 
+  def test_perfetto_trace_writer_timeline_with_empty_committed_steps(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+      t = tracer.Timeline("timeline_test", 1000.0)
+      writer.write_timelines({"timeline_test": t})
+      files = os.listdir(tmp_dir)
+      self.assertEmpty(files)
+
 
 class NoopTraceWriterTest(absltest.TestCase):
 
@@ -432,6 +453,8 @@ class NoopTraceWriterTest(absltest.TestCase):
     writer = trace_writer_lib.NoopTraceWriter()
     t = tracer.Timeline("timeline", 1000.0)
     t.start_span("span1", 1001.0)
+    t.stop_span(1002.0)
+    t.commit_step()
     # Should not crash and do nothing.
     writer.write_timelines({"timeline": t})
 

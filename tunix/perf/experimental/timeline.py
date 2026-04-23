@@ -197,17 +197,6 @@ class Timeline:
     with self._lock:
       return self._committed_steps + [dict(self._cur_step)]
 
-  @property
-  def spans(self) -> dict[int, Span]:
-    """Backwards compatibility alias for all spans (history + current)."""
-    # TODO: remove the spans() and just return history + cur_step
-    with self._lock:
-      merged = {}
-      for step_chunk in self._committed_steps:
-        merged.update(step_chunk)
-      merged.update(self._cur_step)
-    return merged
-
   def start_span(
       self, name: str, begin: float, tags: Mapping[str, Any] | None = None
   ) -> Span:
@@ -254,17 +243,6 @@ class Timeline:
         )
       _span.end = end
 
-  def snapshot(self) -> Timeline:
-    """Returns a snapshot of the timeline with only completed spans."""
-    with self._lock:
-      tl = self.__class__(self.id, self.born)
-      tl._cur_step = dict(self._cur_step)
-      tl._committed_steps = list(self._committed_steps)
-      # Remove any active (uncompleted) spans from the snapshot.
-      for span_id in self._spans_stack:
-        tl._cur_step.pop(span_id, None)
-      return tl
-
   def commit_step(self) -> None:
     """Commits current step spans to history, purging any uncompleted/dangling spans."""
     with self._lock:
@@ -289,11 +267,18 @@ class Timeline:
       self._cur_step = {}
 
   def __repr__(self) -> str:
-    out = f"Timeline({self.id}, {self.born:.6f})\n"
+    parts = [f"Timeline({self.id}, {self.born:.6f})\n"]
     with self._lock:
-      for s in sorted(self.spans.values(), key=lambda span: span.id):
-        out += f"{s._format_relative(self.born)}\n"
-    return out
+      if self._cur_step:
+        parts.append(f"Current Step -{len(self._committed_steps)}:\n")
+        for s in sorted(self._cur_step.values(), key=lambda span: span.id):
+          parts.append(f"  {s._format_relative(self.born)}\n")
+      for i, step in enumerate(reversed(self._committed_steps)):
+        if step:
+          parts.append(f"Committed Step -{i}:\n")
+          for s in sorted(step.values(), key=lambda span: span.id):
+            parts.append(f"  {s._format_relative(self.born)}\n")
+    return "".join(parts)
 
 
 class AsyncTimeline(Timeline):

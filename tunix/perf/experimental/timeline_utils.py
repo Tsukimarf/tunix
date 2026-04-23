@@ -98,18 +98,26 @@ def generate_device_timeline_ids(
 
 
 def is_timeline_only_of_allowed_type(
-    tl: timeline.Timeline, allowed_span_names: Sequence[str]
+    tl: timeline.Timeline,
+    allowed_span_names: Sequence[str],
+    include_cur_step: bool = False,
 ) -> bool:
   """Checks if all spans in a timeline are of allowed types.
 
   Args:
     tl: The timeline to check.
     allowed_span_names: A sequence of allowed span names.
+    include_cur_step: Whether to include the uncommitted cur_step spans.
 
   Returns:
     True if the timeline has spans and all spans have a name in
     `allowed_span_names`, False otherwise.
   """
-  if not tl.spans:
-    return False
-  return all(span.name in allowed_span_names for span in tl.spans.values())
+  has_spans = False
+  steps = tl.all_steps if include_cur_step else tl.committed_steps
+  for step in steps:
+    for span in step.values():
+      has_spans = True
+      if span.name not in allowed_span_names:
+        return False
+  return has_spans

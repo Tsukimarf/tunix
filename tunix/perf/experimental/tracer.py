@@ -164,15 +164,16 @@ class PerfTracer(NoopTracer):
         self._get_or_create_device_timeline(device_id)
     self._collect_on_first_device_per_mesh = collect_on_first_device_per_mesh
 
-  def _get_timeline_snapshots(self) -> Mapping[str, Timeline]:
+  def _get_timelines(self) -> Mapping[str, Timeline]:
+    # TODO(noghabi): do we need this function anymore?
     timelines_by_id: dict[str, Timeline] = {}
     with self._timelines_lock:
       for tl in self._host_timelines.values():
-        timelines_by_id[tl.id] = tl.snapshot()
+        timelines_by_id[tl.id] = tl
       for tl in self._device_timelines.values():
         if tl.id in timelines_by_id:
           raise ValueError(f"Timeline ID collision detected: {tl.id!r}")
-        timelines_by_id[tl.id] = tl.snapshot()
+        timelines_by_id[tl.id] = tl
     return timelines_by_id
 
   def _get_or_create_host_timeline(self, timeline_id: str) -> Timeline:
@@ -213,7 +214,7 @@ class PerfTracer(NoopTracer):
   def print(self) -> None:
     """Synchronizes and prints the captured timelines to standard output."""
     self.synchronize()
-    for tl in self._get_timeline_snapshots().values():
+    for tl in self._get_timelines().values():
       print(f"\n[{tl.id}]")
       print(tl)
 
@@ -236,7 +237,7 @@ class PerfTracer(NoopTracer):
       return {}
 
     self.commit_timelines()
-    return self._export_fn(self._get_timeline_snapshots())
+    return self._export_fn(self._get_timelines())
 
   @property
   def all_devices(self) -> Sequence[str]:

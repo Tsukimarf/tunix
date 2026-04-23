@@ -81,11 +81,59 @@ class TimelineIdGenerationTest(parameterized.TestCase):
     tl = timeline.Timeline("test", 0)
     for i, span_name in enumerate(spans_to_add):
       tl.start_span(span_name, float(i))
+      tl.stop_span(float(i) + 0.5)
 
-    self.assertEqual(
-        timeline_utils.is_timeline_only_of_allowed_type(tl, allowed_types),
-        expected,
-    )
+    with self.subTest("without_commit_no_cur_step"):
+      # without current step it shouldn't see anything without a commit
+      self.assertFalse(
+          timeline_utils.is_timeline_only_of_allowed_type(tl, allowed_types)
+      )
+
+    with self.subTest("without_commit_with_cur_step"):
+      # Using include_current_step should match expected
+      self.assertEqual(
+          timeline_utils.is_timeline_only_of_allowed_type(
+              tl, allowed_types, include_cur_step=True
+          ),
+          expected,
+      )
+
+    tl.commit_step()
+
+    with self.subTest("after_commit_no_cur_step"):
+      # After commit, default should match expected with or without
+      # include_cur_step
+      self.assertEqual(
+          timeline_utils.is_timeline_only_of_allowed_type(tl, allowed_types),
+          expected,
+      )
+
+    with self.subTest("after_commit_with_cur_step"):
+      self.assertEqual(
+          timeline_utils.is_timeline_only_of_allowed_type(
+              tl, allowed_types, include_cur_step=True
+          ),
+          expected,
+      )
+
+    if expected:
+      # Add an unallowed span to the current step
+      tl.start_span("unallowed_span_xyz", 10.0)
+      tl.stop_span(10.5)
+
+      with self.subTest("unallowed_span_in_cur_step_default"):
+        # Default (include_cur_step=False) ignores cur_step
+        self.assertTrue(
+            timeline_utils.is_timeline_only_of_allowed_type(tl, allowed_types)
+        )
+
+      with self.subTest("unallowed_span_in_cur_step_included"):
+        # With include_cur_step=True, the unallowed span causes a False return
+        self.assertFalse(
+            timeline_utils.is_timeline_only_of_allowed_type(
+                tl, allowed_types, include_cur_step=True
+            )
+        )
 
   @parameterized.named_parameters(
       dict(testcase_name="host_with_id", tl_id="host-12345", expected=True),
