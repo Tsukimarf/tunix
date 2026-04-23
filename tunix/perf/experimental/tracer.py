@@ -49,10 +49,17 @@ class AsyncWaitlist:
     self._waitlist = []
 
   def async_end(self, waitlist: jaxtyping.PyTree) -> None:
+    """Adds a JAX PyTree computation to the asynchronous waitlist.
+
+    Args:
+      waitlist: A JAX PyTree (e.g., arrays or nested lists of arrays) to wait on
+        before marking the span as ended.
+    """
     self._waitlist.append(waitlist)
 
   @property
   def waitlist(self) -> jaxtyping.PyTree:
+    """Returns the current accumulated waitlist."""
     return self._waitlist
 
 
@@ -60,16 +67,27 @@ class NoopTracer:
   """A no-op tracer that does nothing."""
 
   def synchronize(self) -> None:
+    """Synchronizes all devices to ensure pending computations are finished.
+
+    Use this carefully as it is a blocking operation.
+    """
     pass
 
   def print(self) -> None:
+    """Prints the captured timelines to standard output."""
     pass
 
   def export(self) -> MetricsT:
+    """Exports the gathered timeline metrics.
+
+    Returns:
+      An empty dictionary as no metrics are collected by NoopTracer.
+    """
     return {}
 
   @property
   def all_devices(self) -> Sequence[str | JaxDevice]:
+    """Returns a list of all devices tracked by the tracer."""
     return []
 
   @contextlib.contextmanager
@@ -79,6 +97,17 @@ class NoopTracer:
       devices: Sequence[str | JaxDevice] | np.ndarray | None = None,
       tags: Mapping[str, Any] | None = None,
   ) -> Iterator[AsyncWaitlist]:
+    """A context manager to trace a span of execution.
+
+    Args:
+      name: The name of the span.
+      devices: A sequence of devices or a numpy array of devices on which the
+        span is executed.
+      tags: A mapping of tags associated with the span.
+
+    Yields:
+      An AsyncWaitlist for associating asynchronous computations with this span.
+    """
     yield AsyncWaitlist()
 
 
@@ -171,6 +200,10 @@ class PerfTracer(NoopTracer):
     ])
 
   def synchronize(self) -> None:
+    """Synchronizes all devices and waits for pending asynchronous spans to finish.
+
+    Use this carefully as it is a blocking operation.
+    """
     _synchronize_devices()
     with self._timelines_lock:
       device_timelines = list(self._device_timelines.values())
@@ -178,18 +211,36 @@ class PerfTracer(NoopTracer):
       tl.wait_pending_spans()
 
   def print(self) -> None:
+    """Synchronizes and prints the captured timelines to standard output."""
     self.synchronize()
     for tl in self._get_timeline_snapshots().values():
       print(f"\n[{tl.id}]")
       print(tl)
 
+  def commit_timelines(self) -> None:
+    """Explicitly commits current steps across all active timelines."""
+    with self._timelines_lock:
+      for tl in self._host_timelines.values():
+        tl.commit_step()
+      for tl in self._device_timelines.values():
+        tl.commit_step()
+
   def export(self) -> MetricsT:
+    """Commits timelines and exports the gathered metrics using export_fn.
+
+    Returns:
+      The result of the export function applied to the timeline snapshots, or an
+      empty dictionary if no export_fn was provided.
+    """
     if self._export_fn is None:
       return {}
+
+    self.commit_timelines()
     return self._export_fn(self._get_timeline_snapshots())
 
   @property
   def all_devices(self) -> Sequence[str]:
+    """Returns a list of all device IDs currently tracked by the tracer."""
     with self._timelines_lock:
       return list(self._device_timelines.keys())
 
@@ -200,6 +251,20 @@ class PerfTracer(NoopTracer):
       devices: Sequence[str | JaxDevice] | np.ndarray | None = None,
       tags: Mapping[str, Any] | None = None,
   ) -> Iterator[AsyncWaitlist]:
+    """A context manager to trace a synchronous or asynchronous span of execution.
+
+    Args:
+      name: The name of the span.
+      devices: An optional sequence or array of JAX devices to track this span
+        on.
+      tags: An optional dictionary of tags to associate with the span.
+
+    Yields:
+      An AsyncWaitlist for accumulating JAX computations. When the context
+      exits,
+      the tracker waits on the accumulated waitlist before completing the device
+      span.
+    """
     span_devices = devices
     if self._collect_on_first_device_per_mesh and devices is not None:
       if isinstance(devices, np.ndarray):

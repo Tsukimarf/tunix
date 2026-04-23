@@ -61,18 +61,55 @@ class SpanTest(absltest.TestCase):
 
 class TimelineTest(absltest.TestCase):
 
+  def test_commit_step(self):
+    t = timeline.Timeline("test_tl", 0.0)
+
+    # Start and stop a span
+    s1 = t.start_span("span1", 1.0)
+    t.stop_span(2.0)
+
+    # Start an uncompleted span
+    s2 = t.start_span("span2", 3.0)
+
+    with self.subTest("Pre-commit state"):
+      self.assertLen(t.cur_step, 2)
+      self.assertEmpty(t.committed_steps)
+
+    # Commit step
+    with self.assertLogs(level="WARNING") as cm:
+      t.commit_step()
+
+    with self.subTest("Post-commit purging"):
+      # Verify uncompleted span was purged
+      self.assertTrue(
+          any("Purging uncompleted span 'span2'" in o for o in cm.output)
+      )
+
+    with self.subTest("Committed steps"):
+      self.assertLen(t.committed_steps, 1)
+      self.assertIn(s1.id, t.committed_steps[0])
+      self.assertNotIn(s2.id, t.committed_steps[0])
+
+    with self.subTest("All steps and current step"):
+      self.assertEmpty(t.cur_step)
+      self.assertLen(t.all_steps, 2)
+      self.assertEqual(t.all_steps[0], t.committed_steps[0])
+      self.assertEqual(t.all_steps[1], {})
+
   def test_basic_span_lifecycle(self):
     t = timeline.Timeline("test_tl", 100.0)
     s = t.start_span("span1", 101.0)
-    self.assertEqual(s.name, "span1")
-    self.assertEqual(s.begin, 101.0)
-    self.assertEqual(s.id, 0)
-    self.assertIsNone(s.parent_id)
-    self.assertFalse(s.ended)
+    with self.subTest("Span started"):
+      self.assertEqual(s.name, "span1")
+      self.assertEqual(s.begin, 101.0)
+      self.assertEqual(s.id, 0)
+      self.assertIsNone(s.parent_id)
+      self.assertFalse(s.ended)
 
     t.stop_span(102.0)
-    self.assertTrue(s.ended)
-    self.assertEqual(s.end, 102.0)
+    with self.subTest("Span stopped"):
+      self.assertTrue(s.ended)
+      self.assertEqual(s.end, 102.0)
 
   def test_nested_spans(self):
     t = timeline.Timeline("test_tl", 0.0)
@@ -270,13 +307,15 @@ class AsyncTimelineTest(absltest.TestCase):
         t = timeline._async_wait(waitlist, success_cb, failure_cb)
 
         # Verify it returned a thread and started it
-        self.assertIsInstance(t, threading.Thread)
-        self.assertIsNotNone(t.ident)
+        with self.subTest("Thread execution"):
+          self.assertIsInstance(t, threading.Thread)
+          self.assertIsNotNone(t.ident)
         t.join()
 
-        mock_block.assert_called_once_with(waitlist)
-        success_cb.assert_called_once()
-        failure_cb.assert_not_called()
+        with self.subTest("Callbacks and JAX integration"):
+          mock_block.assert_called_once_with(waitlist)
+          success_cb.assert_called_once()
+          failure_cb.assert_not_called()
     finally:
       self.patcher.start()
 

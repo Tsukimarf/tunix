@@ -181,17 +181,17 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       # Create mock spans manually to simulate overlaps
       span1 = tracer.Span(name="span_1", begin=1001.0, id=1)
       span1.end = 1005.0
-      t.spans[1] = span1
+      t._cur_step[1] = span1
 
       # Overlaps with span 1
       span2 = tracer.Span(name="span_2", begin=1002.0, id=2)
       span2.end = 1006.0
-      t.spans[2] = span2
+      t._cur_step[2] = span2
 
       # Starts exactly when span 2 ends, testing tie-breaker logic
       span3 = tracer.Span(name="span_3", begin=1006.0, id=3)
       span3.end = 1010.0
-      t.spans[3] = span3
+      t._cur_step[3] = span3
 
       writer.write_timelines({"overlap_timeline": t})
 

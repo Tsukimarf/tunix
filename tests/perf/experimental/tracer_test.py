@@ -157,21 +157,24 @@ class PerfTracerTest(absltest.TestCase):
       span.async_end(["future"])
 
     timelines = t._get_timeline_snapshots()
-    self.assertIn("tpu0", timelines)
-    self.assertIn("tpu1", timelines)
+
+    with self.subTest("Timeline availability"):
+      self.assertIn("tpu0", timelines)
+      self.assertIn("tpu1", timelines)
 
     tl1 = timelines["tpu0"]
     tl2 = timelines["tpu1"]
     host_tl = timelines[t._main_thread_id]
 
-    # Verify all timelines share the same 'born' time
-    self.assertEqual(tl1.born, tl2.born)
-    self.assertEqual(tl1.born, host_tl.born)
+    with self.subTest("Timeline born alignment"):
+      self.assertEqual(tl1.born, tl2.born)
+      self.assertEqual(tl1.born, host_tl.born)
 
-    self.assertLen(tl1.spans, 1)
-    self.assertLen(tl2.spans, 1)
-    self.assertEqual(tl1.spans[0].name, "multi_dev_op")
-    self.assertEqual(tl2.spans[0].name, "multi_dev_op")
+    with self.subTest("Device spans"):
+      self.assertLen(tl1.spans, 1)
+      self.assertLen(tl2.spans, 1)
+      self.assertEqual(tl1.spans[0].name, "multi_dev_op")
+      self.assertEqual(tl2.spans[0].name, "multi_dev_op")
 
   def test_tracer_collect_on_one_device(self):
     d1 = MockDevice("tpu", 0)
@@ -363,13 +366,27 @@ class PerfTracerTest(absltest.TestCase):
     export_mock = mock.Mock(return_value={"a": 1})
     t = tracer.PerfTracer(export_fn=export_mock)
 
-    res = t.export()
-    self.assertEqual(res, {"a": 1})
+    with mock.patch.object(t, "commit_timelines", autospec=True) as mock_commit:
+      res = t.export()
+      self.assertEqual(res, {"a": 1})
+      mock_commit.assert_called_once()
     export_mock.assert_called_once()
 
     # Check default export
     t2 = tracer.PerfTracer()
     self.assertEqual(t2.export(), {})
+
+  def test_commit_timelines(self):
+    d0 = MockDevice("tpu", 0)
+    t = tracer.PerfTracer(devices=[d0])
+
+    with mock.patch.object(
+        timeline.Timeline, "commit_step", autospec=True
+    ) as mock_commit:
+      t.commit_timelines()
+
+      # Should be called once for host timeline and once for device timeline
+      self.assertEqual(mock_commit.call_count, 2)
 
 
 class AdvancedPerfTracerTest(absltest.TestCase):
@@ -411,12 +428,13 @@ class AdvancedPerfTracerTest(absltest.TestCase):
       self.controller.trigger(1)  # Index 1 is B
 
     dev_timeline = t._get_timeline_snapshots()["tpu0"]
-    self.assertLen(dev_timeline.spans, 1)
-    # Verify B is complete and A (ID 0) is NOT complete (still pending)
-    self.assertIn(1, dev_timeline.spans)
-    self.assertNotIn(0, dev_timeline.spans)
-    self.assertEqual(dev_timeline.spans[1].name, "B")
-    self.assertEqual(dev_timeline.spans[1].end, 100.0)
+    with self.subTest("Span B completion"):
+      self.assertLen(dev_timeline.spans, 1)
+      # Verify B is complete and A (ID 0) is NOT complete (still pending)
+      self.assertIn(1, dev_timeline.spans)
+      self.assertNotIn(0, dev_timeline.spans)
+      self.assertEqual(dev_timeline.spans[1].name, "B")
+      self.assertEqual(dev_timeline.spans[1].end, 100.0)
 
     # 4. Complete Span A
     with mock.patch.object(
@@ -425,13 +443,15 @@ class AdvancedPerfTracerTest(absltest.TestCase):
       self.controller.trigger(0)  # Index 0 is A
 
     dev_timeline = t._get_timeline_snapshots()["tpu0"]
-    self.assertLen(dev_timeline.spans, 2)
-    self.assertEqual(dev_timeline.spans[0].name, "A")
-    self.assertEqual(dev_timeline.spans[0].end, 101.0)
+    with self.subTest("Span A completion"):
+      self.assertLen(dev_timeline.spans, 2)
+      self.assertEqual(dev_timeline.spans[0].name, "A")
+      self.assertEqual(dev_timeline.spans[0].end, 101.0)
 
     # Verify IDs (sequential based on start order)
-    self.assertEqual(dev_timeline.spans[0].id, 0)
-    self.assertEqual(dev_timeline.spans[1].id, 1)
+    with self.subTest("Sequential span IDs"):
+      self.assertEqual(dev_timeline.spans[0].id, 0)
+      self.assertEqual(dev_timeline.spans[1].id, 1)
 
   def test_host_nesting_and_device_flatness(self):
     """Tests correct nesting on host vs flat structure on device."""
