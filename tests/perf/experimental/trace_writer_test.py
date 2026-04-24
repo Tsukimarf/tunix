@@ -87,6 +87,12 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
           {},
           "simple_span",
       ),
+      (
+          "queue_with_name",
+          perf_constants.QUEUE,
+          {perf_constants.NAME: "data_loading"},
+          "queue (name=data_loading)",
+      ),
   )
   def test_create_span_name(self, name, tags, expected):
     actual_name = trace_writer_lib._create_span_name(name, tags)
@@ -324,10 +330,15 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       t_tpu1.start_span("compute2", 1004.0)
       t_tpu1.stop_span(1005.0)
 
+      t_tpu0_queue = tracer.Timeline("tpu0_queue", 1000.0)
+      t_tpu0_queue.start_span("queue_span", 1002.0)
+      t_tpu0_queue.stop_span(1003.0)
+
       timelines = {
           "host-1": t_main,
           "host-2": t_rollout,
           "tpu0": t_tpu,
+          "tpu0_queue": t_tpu0_queue,
           "tpu1": t_tpu1,
       }
       for tl in timelines.values():
@@ -341,7 +352,8 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     host_1 = captured_packets[4].track_descriptor
     host_2 = captured_packets[5].track_descriptor
     tpu0 = captured_packets[6].track_descriptor
-    tpu1 = captured_packets[7].track_descriptor
+    tpu0_queue = captured_packets[7].track_descriptor
+    tpu1 = captured_packets[8].track_descriptor
 
     with self.subTest("host_main_threads_group"):
       self.assertEqual(main_group.name, "Host - Main threads")
@@ -368,6 +380,10 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     with self.subTest("tpu0"):
       self.assertEqual(tpu0.name, "tpu0")
       self.assertEqual(tpu0.parent_uuid, tpu0_group.uuid)
+
+    with self.subTest("tpu0_queue"):
+      self.assertEqual(tpu0_queue.name, "tpu0_queue")
+      self.assertEqual(tpu0_queue.parent_uuid, tpu0_group.uuid)
 
     with self.subTest("tpu1"):
       self.assertEqual(tpu1.name, "tpu1")

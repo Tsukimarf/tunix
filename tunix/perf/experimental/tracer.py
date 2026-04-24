@@ -136,6 +136,7 @@ class PerfTracer(NoopTracer):
       export_fn: Callable[[Any], MetricsT] | None = None,
       *,
       collect_on_first_device_per_mesh: bool = True,
+      concurrent_device_spans: Sequence[str] | str | None = None,
   ) -> None:
     """Initializes the instance.
 
@@ -145,6 +146,12 @@ class PerfTracer(NoopTracer):
         a MetricsT object.
       collect_on_first_device_per_mesh: If True, collect trace data on the first
         device per mesh when calling span().
+      concurrent_device_spans: A list of span names that are allowed to run
+        concurrently (overlap) on a device timeline. These spans will not be
+        sequentialized. If a single span from the ignore list is present, the
+        entire timeline will not be sequentialized. If "all" is passed, no
+        sequentialization will be performed on any device timeline. If None, all
+        device timelines will be sequentialized.
     """
 
     self._export_fn = export_fn
@@ -159,10 +166,18 @@ class PerfTracer(NoopTracer):
         self._main_thread_id: Timeline(self._main_thread_id, self._born)
     }
     self._device_timelines: dict[str, AsyncTimeline] = {}
+    self._device_queue_timelines: dict[str, Timeline] = {}
     if devices is not None:
       for device_id in timeline_utils.generate_device_timeline_ids(devices):
         self._get_or_create_device_timeline(device_id)
     self._collect_on_first_device_per_mesh = collect_on_first_device_per_mesh
+    if (
+        isinstance(concurrent_device_spans, str)
+        and concurrent_device_spans != "all"
+    ):
+      self._concurrent_spans = [concurrent_device_spans]
+    else:
+      self._concurrent_spans = concurrent_device_spans
 
   def _get_timelines(self) -> Mapping[str, Timeline]:
     # TODO(noghabi): do we need this function anymore?
@@ -174,6 +189,11 @@ class PerfTracer(NoopTracer):
         if tl.id in timelines_by_id:
           raise ValueError(f"Timeline ID collision detected: {tl.id!r}")
         timelines_by_id[tl.id] = tl
+      for tl in self._device_queue_timelines.values():
+        if tl.id in timelines_by_id:
+          raise ValueError(f"Timeline ID collision detected: {tl.id!r}")
+        timelines_by_id[tl.id] = tl
+
     return timelines_by_id
 
   def _get_or_create_host_timeline(self, timeline_id: str) -> Timeline:
@@ -190,6 +210,11 @@ class PerfTracer(NoopTracer):
       if device_timeline is None:
         device_timeline = AsyncTimeline(timeline_id, self._born)
         self._device_timelines[timeline_id] = device_timeline
+        queue_tl_id = timeline_utils.generate_queued_timeline_id(timeline_id)
+        self._device_queue_timelines[queue_tl_id] = Timeline(
+            queue_tl_id, self._born
+        )
+
       return device_timeline
 
   def _get_or_create_device_timelines(
@@ -218,12 +243,44 @@ class PerfTracer(NoopTracer):
       print(f"\n[{tl.id}]")
       print(tl)
 
-  def commit_timelines(self) -> None:
+  def _sequentialize_device_timeline(
+      self, timeline_id: str, tl: AsyncTimeline
+  ) -> None:
+    """Sequentializes overlapping spans on a device timeline."""
+    with tl._lock:
+      ignore_list = self._concurrent_spans or []
+      if any(span.name in ignore_list for span in tl._cur_step.values()):
+        return
+
+      active_spans, queue_spans = (
+          timeline_utils.sequentialize_overlapping_spans(tl._cur_step)
+      )
+
+      tl._cur_step = dict(active_spans)
+
+      if queue_spans:
+        queue_tl_id = timeline_utils.generate_queued_timeline_id(timeline_id)
+        queue_tl = self._device_queue_timelines[queue_tl_id]
+
+        with queue_tl._lock:
+          for span_id, span in queue_spans.items():
+            queue_tl._cur_step[span_id] = span
+
+  def process_and_commit_timelines(self) -> None:
     """Explicitly commits current steps across all active timelines."""
     with self._timelines_lock:
+      # 1. Post process timelines
+      # Sequentialize overlapping device timelines, except for those in ignore list.
+      if self._concurrent_spans != "all":
+        for timeline_id, tl in self._device_timelines.items():
+          self._sequentialize_device_timeline(timeline_id, tl)
+
+      # 2. Commit all timelines.
       for tl in self._host_timelines.values():
         tl.commit_step()
       for tl in self._device_timelines.values():
+        tl.commit_step()
+      for tl in self._device_queue_timelines.values():
         tl.commit_step()
 
   def export(self) -> MetricsT:
@@ -236,7 +293,7 @@ class PerfTracer(NoopTracer):
     if self._export_fn is None:
       return {}
 
-    self.commit_timelines()
+    self.process_and_commit_timelines()
     return self._export_fn(self._get_timelines())
 
   @property

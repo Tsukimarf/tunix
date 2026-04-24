@@ -210,6 +210,87 @@ class TimelineIdGenerationTest(parameterized.TestCase):
         timeline_utils.generate_device_timeline_ids(devices), expected_ids
     )
 
+  def test_sequentialize_overlapping_spans_standard(self):
+    spans = {
+        0: timeline.Span("a", 0.0, id=0),
+        1: timeline.Span("b", 1.0, id=1),
+    }
+    spans[0].end = 2.0
+    spans[1].end = 3.0
+
+    active_spans, queue_spans = timeline_utils.sequentialize_overlapping_spans(spans)
+
+    with self.subTest("active_spans"):
+      self.assertEqual(active_spans[0].begin, 0.0)
+      self.assertEqual(active_spans[0].end, 2.0)
+      self.assertEqual(active_spans[1].begin, 2.0)
+      self.assertEqual(active_spans[1].end, 3.0)
+
+    with self.subTest("queue_spans"):
+      self.assertIn(1, queue_spans)
+      self.assertEqual(queue_spans[1].begin, 1.0)
+      self.assertEqual(queue_spans[1].end, 2.0)
+
+  def test_sequentialize_overlapping_spans_three_way_contention(self):
+    spans = {
+        0: timeline.Span("c", 5.0, id=0),
+        1: timeline.Span("d", 6.0, id=1),
+        2: timeline.Span("e", 6.5, id=2),
+    }
+    spans[0].end = 8.0
+    spans[1].end = 9.0
+    spans[2].end = 10.0
+
+    active_spans, queue_spans = timeline_utils.sequentialize_overlapping_spans(spans)
+
+    with self.subTest("active_spans"):
+      self.assertEqual(active_spans[0].begin, 5.0)
+      self.assertEqual(active_spans[0].end, 8.0)
+      self.assertEqual(active_spans[1].begin, 8.0)
+      self.assertEqual(active_spans[1].end, 9.0)
+      self.assertEqual(active_spans[2].begin, 9.0)
+      self.assertEqual(active_spans[2].end, 10.0)
+
+    with self.subTest("queue_spans"):
+      self.assertIn(1, queue_spans)
+      self.assertEqual(queue_spans[1].begin, 6.0)
+      self.assertEqual(queue_spans[1].end, 8.0)
+
+      self.assertIn(2, queue_spans)
+      self.assertEqual(queue_spans[2].begin, 8.0)
+      self.assertEqual(queue_spans[2].end, 9.0)
+
+  def test_sequentialize_overlapping_spans_subsumed_span(self):
+    spans = {
+        0: timeline.Span("f", 15.0, id=0),
+        1: timeline.Span("g", 15.1, id=1),
+    }
+    spans[0].end = 18.0
+    spans[1].end = 15.5
+
+    active_spans, queue_spans = timeline_utils.sequentialize_overlapping_spans(spans)
+
+    with self.subTest("active_membership"):
+      self.assertIn(0, active_spans)
+      self.assertNotIn(1, active_spans)
+
+    with self.subTest("queue_membership"):
+      self.assertIn(1, queue_spans)
+
+  def test_sequentialize_overlapping_spans_empty(self):
+    active_spans, queue_spans = timeline_utils.sequentialize_overlapping_spans({})
+    self.assertEmpty(active_spans)
+    self.assertEmpty(queue_spans)
+
+  def test_generate_queued_timeline_id(self):
+    self.assertEqual(
+        timeline_utils.generate_queued_timeline_id("tpu0"), "tpu0_queue"
+    )
+
+  def test_is_queued_timeline(self):
+    self.assertTrue(timeline_utils.is_queued_timeline("tpu0_queue"))
+    self.assertFalse(timeline_utils.is_queued_timeline("tpu0"))
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -67,6 +67,10 @@ def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
     if perf_constants.PAIR_INDEX in tags:
       parts.append(f"pair_index={tags[perf_constants.PAIR_INDEX]}")
 
+  if name == perf_constants.QUEUE:
+    if perf_constants.NAME in tags:
+      parts.append(f"name={tags[perf_constants.NAME]}")
+
   if parts:
     return f"{name} ({', '.join(parts)})"
   return name
@@ -194,11 +198,17 @@ class PerfettoTraceWriter(TraceWriter):
     if timeline_utils.is_host_timeline(tl_id):
       return None
 
+    base_tl_id = (
+        tl_id[:-6] if timeline_utils.is_queued_timeline(tl_id) else tl_id
+    )
+
     cluster_roles = []
+
     for role, devices in self._role_to_devices.items():
       for device in devices:
         device_str = timeline_utils.generate_device_timeline_id(device)
-        if device_str == tl_id and role not in cluster_roles:
+        if device_str == base_tl_id and role not in cluster_roles:
+
           cluster_roles.append(role)
 
     if cluster_roles:

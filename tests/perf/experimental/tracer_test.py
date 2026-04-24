@@ -14,13 +14,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import io
 import threading
 import time
 from typing import Any, Callable, List
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import numpy as np
 from tunix.perf.experimental import timeline
 from tunix.perf.experimental import tracer
@@ -370,7 +373,10 @@ class PerfTracerTest(absltest.TestCase):
     export_mock = mock.Mock(return_value={"a": 1})
     t = tracer.PerfTracer(export_fn=export_mock)
 
-    with mock.patch.object(t, "commit_timelines", autospec=True) as mock_commit:
+    with mock.patch.object(
+        t, "process_and_commit_timelines", autospec=True
+    ) as mock_commit:
+
       res = t.export()
       self.assertEqual(res, {"a": 1})
       mock_commit.assert_called_once()
@@ -395,15 +401,62 @@ class PerfTracerTest(absltest.TestCase):
     with t.span("test_span", devices=[d0]) as span:
       span.async_end(["future"])
 
-    t.commit_timelines()
+    t.process_and_commit_timelines()
 
     timelines = t._get_timelines()
     # Host timeline and device timeline should both have one committed step
     for tl in timelines.values():
       self.assertLen(tl.committed_steps, 1)
 
+  def test_tracer_print(self):
+    d1 = MockDevice("tpu", 0)
+    t = tracer.PerfTracer(devices=[d1])
 
-class AdvancedPerfTracerTest(absltest.TestCase):
+    def immediate_success(
+        waitlist: Any, success: Callable[[], None], failure: Callable[[], None]
+    ) -> mock.Mock:
+      success()
+      return mock.create_autospec(threading.Thread, instance=True)
+
+    self.mock_async_wait.side_effect = immediate_success
+
+    with t.span("span1", devices=[d1]) as span:
+      span.async_end(["w1"])
+    t.process_and_commit_timelines()
+    with t.span("span2", devices=[d1]) as span:
+      span.async_end(["w2"])
+
+    # Capture stdout
+    with io.StringIO() as captured_output:
+      with contextlib.redirect_stdout(captured_output):
+        t.print()
+      output = captured_output.getvalue()
+    self.assertIn("span1", output)
+    self.assertIn("span2", output)
+    self.assertIn("Committed Step", output)
+    self.assertIn("Current Step", output)
+
+  def test_get_timelines_includes_queue_timelines(self):
+    d1 = MockDevice("tpu", 0)
+    t = tracer.PerfTracer(devices=[d1])
+
+    def immediate_success(
+        waitlist: Any, success: Callable[[], None], failure: Callable[[], None]
+    ) -> mock.Mock:
+      success()
+      return mock.create_autospec(threading.Thread, instance=True)
+
+    self.mock_async_wait.side_effect = immediate_success
+
+    with t.span("span1", devices=[d1]) as span:
+      span.async_end(["w1"])
+
+    timelines = t._get_timelines()
+    self.assertIn("tpu0", timelines)
+    self.assertIn("tpu0_queue", timelines)
+
+
+class AdvancedPerfTracerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -549,6 +602,74 @@ class AdvancedPerfTracerTest(absltest.TestCase):
     ids = sorted(dev_cur_step.keys())
     self.assertEqual(ids, list(range(total_spans)))
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="disabled_all",
+          concurrent_spans="all",
+          span1_name="rollout",
+          span2_name="inference",
+          expect_sequentializing=False,
+      ),
+      dict(
+          testcase_name="with_hit",
+          concurrent_spans=["rollout"],
+          span1_name="rollout",
+          span2_name="inference",
+          expect_sequentializing=False,
+      ),
+      dict(
+          testcase_name="with_hit_string",
+          concurrent_spans="rollout",
+          span1_name="rollout",
+          span2_name="inference",
+          expect_sequentializing=False,
+      ),
+      dict(
+          testcase_name="no_hit",
+          concurrent_spans=["other"],
+          span1_name="train",
+          span2_name="inference",
+          expect_sequentializing=True,
+      ),
+  )
+  def test_concurrent_spans(
+      self, concurrent_spans, span1_name, span2_name, expect_sequentializing
+  ):
+    t = tracer.PerfTracer(
+        devices=[self.device], concurrent_device_spans=concurrent_spans
+    )
+
+    with t.span(span1_name, devices=[self.device]) as s1:
+      s1.async_end(["w1"])
+
+    with t.span(span2_name, devices=[self.device]) as s2:
+      s2.async_end(["w2"])
+
+    self.controller.trigger_all()
+    t.synchronize()
+
+    # Overlap spans to trigger sequentializing if it was not disabled
+    timelines = t._get_timelines()
+    dev_tl = timelines["tpu0"]
+    with dev_tl._lock:
+      spans = list(dev_tl._cur_step.values())
+      spans[0].begin = 0.0
+      spans[0].end = 2.0
+      spans[1].begin = 1.0
+      spans[1].end = 3.0
+
+    t.process_and_commit_timelines()
+
+    self.assertLen(dev_tl.committed_steps[0], 2)
+
+    if expect_sequentializing:
+      # Check if queued timeline is created and populated with the queued portion
+      queue_tl = list(t._device_queue_timelines.values())[0]
+      self.assertLen(queue_tl.committed_steps[0], 1)
+    else:
+      queue_tl = list(t._device_queue_timelines.values())[0]
+      self.assertEmpty(queue_tl.committed_steps[0])
+
 
 class PrivateHelpersTest(absltest.TestCase):
 
@@ -585,6 +706,79 @@ class NoopTracerTest(absltest.TestCase):
   def test_noop_tracer_print(self):
     t = tracer.NoopTracer()
     t.print()
+
+  def test_span_lifecycle(self):
+    span = timeline.Span(
+        name="test", begin=0.0, id=1, parent_id=0, tags={"k": "v"}
+    )
+    self.assertFalse(span.ended)
+    span.end = 1.0
+    self.assertTrue(span.ended)
+    self.assertEqual(span.duration, 1.0)
+
+  def test_span_tags(self):
+    span = timeline.Span(
+        name="test", begin=0.0, id=1, parent_id=0, tags={"k": "v"}
+    )
+    span.add_tag("k2", "v2")
+    self.assertEqual(span.tags["k2"], "v2")
+    # Test overwriting tag
+    with self.assertLogs(level="WARNING") as cm:
+      span.add_tag("k2", "v3")
+    self.assertIn("Tag 'k2' already exists", cm.output[0])
+    self.assertEqual(span.tags["k2"], "v3")
+
+  def test_span_end_before_begin(self):
+    tl = timeline.Timeline("host", 0.0)
+    tl.start_span("test", 10.0)
+    with self.assertRaisesRegex(
+        ValueError, "ended at 5.0.* before it began at 10.0.*"
+    ):
+      tl.stop_span(5.0)
+
+  def test_commit_uncompleted_span(self):
+    tl = timeline.Timeline("host", 0.0)
+    tl.start_span("test", 10.0)
+    with self.assertLogs(level="WARNING") as cm:
+      tl.commit_step()
+    self.assertIn("Purging uncompleted span", cm.output[0])
+    # The span should be removed
+    self.assertEmpty(tl.cur_step)
+    self.assertEmpty(tl.committed_steps[0])
+
+  def test_timeline_properties(self):
+    tl = timeline.Timeline("host", 0.0)
+    span = tl.start_span("test", 10.0)
+    tl.stop_span(11.0)
+    tl.commit_step()
+    span2 = tl.start_span("test2", 12.0)
+    all_steps = tl.all_steps
+    self.assertLen(all_steps, 2)
+    self.assertLen(all_steps[0], 1)
+    self.assertLen(all_steps[1], 1)
+
+
+class AsyncFailureTest(absltest.TestCase):
+
+  def test_async_wait_failure(self):
+    with mock.patch.object(timeline, "jax", autospec=True) as mock_jax:
+      mock_jax.block_until_ready.side_effect = RuntimeError("jax error")
+
+      with mock.patch.object(tracer, "jax", autospec=True) as mock_tracer_jax:
+        mock_tracer_jax.devices.return_value = ["tpu0"]
+        mock_tracer_jax.device_put.return_value.block_until_ready.return_value = (
+            None
+        )
+
+        d0 = MockDevice("tpu", 0)
+        t = tracer.PerfTracer(devices=[d0])
+
+        with self.assertLogs(level="ERROR") as cm:
+          with t.span("failing_op", devices=[d0]) as span:
+            span.async_end(["waitlist"])
+          t.synchronize()
+
+        self.assertRegex("\n".join(cm.output), "jax error")
 
 
 if __name__ == "__main__":
